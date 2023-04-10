@@ -1,0 +1,18 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Python: Attach debugger",
+			"type": "python",
+			"request": "attach",
+			"processId":"${command:pickProcess}",
+			"justMyCode": true
+		},
+		{
+			"name": "LLDB: Attach debugger",
+			"type": "lldb",
+			"request": "attach",
+			"pid": "${command:pickMyProcess}"
+		}
+	]
+}
