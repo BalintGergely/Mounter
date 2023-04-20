@@ -39,7 +39,13 @@ class Gate(Operation):
 	__internal: Operation
 	__goal: bool
 	__name: str
-	def __init__(self, internal: Operation = None, requires: Iterable = ..., produces: Iterable = ..., goal = ..., name = ..., base = ...):
+	def __init__(self,
+	    	internal: Operation = None,
+	    	requires: Iterable = ...,
+			produces: Iterable = ...,
+			goal = ...,
+			name = ...,
+			base = ...):
 		if isinstance(base,Gate):
 			if internal is ...:
 				internal = base.__internal

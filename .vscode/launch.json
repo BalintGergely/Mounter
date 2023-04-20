@@ -13,6 +13,12 @@
 			"type": "lldb",
 			"request": "attach",
 			"pid": "${command:pickMyProcess}"
+		},
+		{
+			"name": "Java: Attach debugger",
+			"type": "java",
+			"request": "attach",
+			"processId":"${command:PickJavaProcess}"
 		}
 	]
 }

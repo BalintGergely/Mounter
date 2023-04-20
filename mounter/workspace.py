@@ -46,7 +46,7 @@ class Asyncio(Module):
 		finally:
 			try:
 				self.__loop.run_until_complete(self.__loop.shutdown_asyncgens())
-				#self.__loop.run_until_complete(self.__loop.shutdown_default_executor())
+				self.__loop.run_until_complete(self.__loop.shutdown_default_executor())
 			finally:
 				asyncio.set_event_loop(None)
 				self.__loop.close()

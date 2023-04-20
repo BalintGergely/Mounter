@@ -1,9 +1,11 @@
 import pathlib
 import shutil
+from io import IO
 from typing import Hashable, Final
 
 class Path(Hashable):
 	'''
+	Represents an absolute file Path.
 	This always uses forward slash '/' for separators.
 	'''
 	__p: Final[pathlib.Path]
@@ -105,11 +107,34 @@ class Path(Hashable):
 			if f.isDirectory():
 				yield from f.getLeaves()
 	
+	def open(self,flags) -> IO:
+		f = set()
+		enc = None
+		for k in flags:
+			match k:
+				case "r":
+					f.add("r")
+				case "w":
+					f.add("w")
+				case "a":
+					f.add("a")
+				case "t":
+					f.add("t")
+					enc = "utf-8" # Never don't use utf8.
+				case "b":
+					f.add("b")
+				case "x":
+					f.add("x")
+		return open(self.__p, "".join(k for k in f), encoding = enc)
+	
 	def getIr(self):
 		return self.__p
 
 class RelativePath(Path):
-	_subpath: Final[pathlib.Path]
+	'''
+	Still represents an absolute file path, but has a relative part for reference.
+	'''
+	_subpath: Final[pathlib.Path] # both this and path point to the same file.
 	def __init__(self,absolute,subpath):
 		super().__init__(absolute)
 		self._subpath = subpath

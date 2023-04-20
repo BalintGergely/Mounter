@@ -4,7 +4,10 @@
 			"path": "."
 		}
 	],
-	"settings": {},
+	"settings": {
+		"editor.insertSpaces": false,
+		"editor.detectIndentation": false
+	},
 	"launch": {
 		"version": "0.2.0",
 		"configurations": []
