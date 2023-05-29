@@ -107,9 +107,13 @@ class Path(Hashable):
 			if f.isDirectory():
 				yield from f.getLeaves()
 	
-	def open(self,flags) -> IO:
+	def open(self,flags,encoding : str = None) -> IO:
 		f = set()
-		enc = None
+		if encoding is None:
+			f.add("b")
+		else:
+			assert isinstance(encoding,str), "Encoding argument must be str!"
+			f.add("t")
 		for k in flags:
 			match k:
 				case "r":
@@ -118,14 +122,11 @@ class Path(Hashable):
 					f.add("w")
 				case "a":
 					f.add("a")
-				case "t":
-					f.add("t")
-					enc = "utf-8" # Never don't use utf8.
-				case "b":
-					f.add("b")
 				case "x":
 					f.add("x")
-		return open(self.__p, "".join(k for k in f), encoding = enc)
+				case default:
+					raise Exception("Unknown flag: "+k)
+		return open(self.__p, "".join(k for k in f), encoding = encoding)
 	
 	def getIr(self):
 		return self.__p

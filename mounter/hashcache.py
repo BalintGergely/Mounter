@@ -29,7 +29,7 @@ class HashCache:
 		assert self.__witness is not None, "Hash cache already written!"
 		assert not self.__tableFile.isDirectory(), "Hash cache must not be a directory!"
 		if self.__tableFile.isFile():
-			with self.__tableFile.open("rt") as input:
+			with self.__tableFile.open("r",encoding="utf-8") as input:
 				self.__table = json.load(input)
 		else:
 			self.__table = {}
@@ -46,7 +46,7 @@ class HashCache:
 			else:
 				savedTable[k] = dict(v)
 		self.__tableFile.opCreateFile()
-		with self.__tableFile.open("wt") as output:
+		with self.__tableFile.open("w",encoding="utf-8") as output:
 			json.dump(
 				obj=savedTable,
 				fp=output,
@@ -95,7 +95,7 @@ class HashCache:
 			# Hash for file is the hash of the content.
 			if key.isFile():
 				checker = hashlib.sha1()
-				with key.open("rb") as input:
+				with key.open("r") as input:
 					while True:
 						data = input.read(65536)
 						if not data:
