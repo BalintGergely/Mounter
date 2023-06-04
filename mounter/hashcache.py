@@ -173,7 +173,7 @@ class Module(workspace.Module):
 	_checker: HashCache
 
 	def __init__(self, checker: HashCache = None):
-		super().__init__(__file__)
+		super().__init__(key = __file__)
 		self._checker = checker
 	
 	def getChecker(self) -> HashCache:

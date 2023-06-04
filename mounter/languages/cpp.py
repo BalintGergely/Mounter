@@ -1,8 +1,9 @@
 from mounter.path import Path
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 import mounter.workspace as workspace
 import mounter.operation as operation
 from mounter.operation import Gate, Command
+from mounter.workspace import Workspace
 
 class CppGroup:
 	"""
@@ -21,29 +22,32 @@ class CppGroup:
 
 class CppModule(workspace.Module):
 	def __init__(self):
-		super().__init__(__file__)
+		super().__init__(key = __file__)
+	
+	def activate(self, context: Workspace):
+		raise Exception("This is an abstract module. You need to register the implementation to use it!")
 
-	def newGroup(self):
+	def newGroup(self) -> CppGroup:
 		raise Exception("Not implemented!")
 
 class CppProject(workspace.Module):
 	def __init__(self, projectFile, *dependencies):
 		super().__init__(projectFile)
 		self.path = Path(projectFile).getParent()
-		self.__dependencies = tuple(dependencies)
+		self.__dependencies : Tuple[CppProject] = tuple(dependencies)
 	
 	def activate(self, context: workspace.Workspace):
 		context.add(CppModule)
 		self.__dependencies = tuple(context.add(d) for d in self.__dependencies)
 	
 	def fillGroup(self, group: CppGroup):
-		group.add(self.path, "project")
+		group.add(self.path, project = True)
 	
 	def group(self):
 		return self._group
 	
 	def run(self, context):
-		cppmod = context[CppModule]
+		cppmod : CppModule = context[CppModule]
 		self._group = cppmod.newGroup()
 		self.fillGroup(self._group)
 		for d in self.__dependencies:
@@ -55,14 +59,15 @@ class ClangGroup(CppGroup):
 		self.rootDir = rootDir
 		self.objDir = objDir
 		self.binDir = binDir
-		self.dependencies: List[CppGroup] = [] # List of group dependencies.
+		self.dependencies: List[ClangGroup] = [] # List of group dependencies.
 		self.provisions: Set[Path] = set() # Set of input (source) files and directories.
 		self.units: Dict[Path,bool] = {} # Set of main files to compile. Value indicates whether it is a main file.
 		self.includes: Dict[Path,bool] = {} # Include paths. True if dependent groups inherit this.
 		self.libraries: Dict[Path,Path] = {} # Library paths. Value is None for static libraries, otherwise where they need to be moved.
 
-	def add(self,p: Path, project: bool = False, private: bool = False):
-		self.provisions.add(p)
+	def add(self,p: Path, project: bool = False, private: bool = False, generated : bool = False):
+		if not generated:
+			self.provisions.add(p)
 		if p.isDirectory():
 			if project:
 				for l in p.getLeaves():
@@ -91,9 +96,9 @@ class ClangGroup(CppGroup):
 		self.dependencies.append(c)
 
 class ClangModule(CppModule):
-	def __init__(self, root = Path(""), obj = Path("obj"), bin = Path("bin")):
+	def __init__(self, root = Path(""), obj = Path("obj/cpp"), bin = Path("bin")):
 		super().__init__()
-		self.groups: List[CppGroup] = []
+		self.groups: List[ClangGroup] = []
 		self.root = root
 		self.obj = obj
 		self.bin = bin

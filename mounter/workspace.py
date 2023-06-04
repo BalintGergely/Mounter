@@ -3,10 +3,14 @@ from typing import Final, Set, Dict, List, final, TypeVar, Tuple
 import asyncio
 
 class Module:
-	key: Final[Tuple]
-	def __init__(self,*key):
+	__key: Final
+	def __init__(self,key):
 		'''key is typically some unique identification of the Module.'''
-		self.key = tuple(key)
+		self.__key = tuple(key)
+
+	@final
+	def key(self):
+		return self.__key
 	
 	def activate(self,context: 'Workspace'):
 		'''
@@ -36,7 +40,7 @@ class Asyncio(Module):
 	Use the wait function in this module to wait for a task.
 	'''
 	def __init__(self):
-		super().__init__(__file__,"asyncio")
+		super().__init__(key = (__file__,"asyncio"))
 	
 	def run(self,context):
 		self.__loop = asyncio.new_event_loop()
@@ -88,7 +92,7 @@ class Workspace:
 	
 	def __getitem__(self,mod: T) -> T:
 		'''Fetch a specific module.'''
-		realMod = self.__activeModules[mod.manifest().key]
+		realMod = self.__activeModules[mod.manifest().key()]
 		assert realMod is not None
 		return realMod
 	
@@ -104,7 +108,7 @@ class Workspace:
 		Register the specific module as a non-default implementation.
 		The module is only activated when any of it's dependents are activated.
 		'''
-		key = mod.key
+		key = mod.key()
 		assert key not in self.__inactiveModules and key not in self.__activeModules, (
 			"use() or add() was already invoked for this module!")
 		self.__inactiveModules[key] = mod
@@ -119,7 +123,7 @@ class Workspace:
 		assert self.__topologyIndex == 0, "Cannot add modules after run is called!"
 		mod: Module = mod.manifest()
 		assert isinstance(mod, Module), "Only subclasses of Module are accepted!"
-		key = mod.key
+		key = mod.key()
 		if key in self.__activeModules:
 			assert self.__activeModules[key] is not None, "Recursive call to add() with key "+str(key)+"!"
 			return self.__activeModules[key]

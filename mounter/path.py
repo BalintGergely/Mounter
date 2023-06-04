@@ -65,7 +65,7 @@ class Path(Hashable):
 	def getName(self) -> str:
 		return self.__p.name
 	
-	def child(self,child):
+	def child(self,child : str):
 		return Path(self.__p.as_posix()+"/"+child)
 	
 	def opCreateFile(self):
@@ -84,6 +84,14 @@ class Path(Hashable):
 	
 	def opDeleteDirectory(self):
 		self.__p.rmdir()
+	
+	def opClearDirectory(self):
+		for file in list(self.getChildren()):
+			if file.isDirectory():
+				file.opClearDirectory()
+				file.opDeleteDirectory()
+			if file.isFile():
+				file.opDeleteFile()
 	
 	def opCopyTo(self,other : 'Path'):
 		shutil.copy(src=str(self),dst=str(other))

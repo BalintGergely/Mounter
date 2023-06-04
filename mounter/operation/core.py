@@ -183,6 +183,27 @@ class Copy(Operation):
 	def __str__(self):
 		return "Copy: "+str(self.__source)+"\nTo: "+str(self.__target)
 
+class CreateDirectory(Operation):
+	'''
+	Operation that creates an empty directory.
+	'''
+	__directory: Path
+	__empty: bool
+
+	def __init__(self, directory: Path, empty: bool = False):
+		self.__directory = directory
+		self.__empty = empty
+	
+	def run(self):
+		if self.__directory.isDirectory():
+			if self.__empty:
+				self.__directory.opClearDirectory()
+		else:
+			self.__directory.opCreateDirectories()
+	
+	def getResultStates(self) -> Iterable:
+		yield self.__directory
+
 class Cluster(Operation):
 	'''
 	An operation that performs all of a given set of operations
@@ -300,7 +321,7 @@ class Module(workspace.Module):
 	__ops: List[Operation]
 
 	def __init__(self,useAsync = False):
-		super().__init__(__file__)
+		super().__init__(key = __file__)
 		self.__useAsync = useAsync
 	
 	def activate(self, context):
