@@ -69,3 +69,13 @@ def filterOrUnwrapGoals(ops: Iterable[Gate], goalState) -> Iterable[Operation]:
 
 def filterRequiredOperations(operations : Iterable[Operation], goalState) -> Iterable[Operation]:
 	return requiredOperations(filterOrUnwrapGoals(operations, goalState))
+
+uniqueStateCounter = int(0)
+
+def uniqueState(name = ...):
+	s = uniqueStateCounter
+	uniqueStateCounter = s + 1
+	if name is ...:
+		return f"unique state {s}"
+	else:
+		return f"unique state {s} {name}"

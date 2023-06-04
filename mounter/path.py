@@ -1,7 +1,7 @@
 import pathlib
 import shutil
-from io import IO
-from typing import Hashable, Final
+from io import TextIOWrapper
+from typing import Hashable, Final, Generator
 
 class Path(Hashable):
 	'''
@@ -59,7 +59,7 @@ class Path(Hashable):
 	def relativeToParent(self) -> 'RelativePath':
 		return self.relativeTo(self.getParent())
 	
-	def getParent(self) -> 'Path':
+	def getParent(self,times: int = 1) -> 'Path':
 		return Path(self.__p.parent)
 	
 	def getName(self) -> str:
@@ -105,7 +105,7 @@ class Path(Hashable):
 	def isPresent(self):
 		return self.__p.exists()
 
-	def getChildren(self):
+	def getChildren(self) -> Generator['Path']:
 		return (Path(p) for p in self.__p.iterdir())
 	
 	def getLeaves(self):
@@ -115,7 +115,19 @@ class Path(Hashable):
 			if f.isDirectory():
 				yield from f.getLeaves()
 	
-	def open(self,flags,encoding : str = None) -> IO:
+	def getPreorder(self):
+		for f in self.getChildren():
+			yield f
+			if f.isDirectory():
+				yield from f.getPreorder()
+	
+	def getPostorder(self):
+		for f in self.getChildren():
+			if f.isDirectory():
+				yield from f.getPostorder()
+			yield f
+	
+	def open(self,flags,encoding : str = None):
 		f = set()
 		if encoding is None:
 			f.add("b")

@@ -4,6 +4,7 @@ from itertools import chain, tee
 import asyncio
 import subprocess
 import mounter.workspace as workspace
+from typing import final
 
 class Operation:
 	'''
@@ -28,6 +29,7 @@ class Operation:
 	def opHash(self):
 		assert False, "opHash() method has not been overridden for type"+type(self)
 
+@final
 class Gate(Operation):
 	'''
 	Class to attach metadata to operations.
@@ -312,7 +314,7 @@ class Command(Operation):
 			raise Exception(subprocess.list2cmdline(self.__command))
 	
 	def opHash(self):
-		return " ".join("\"{}\"".format(k) for k in self.__command)
+		return " ".join(f"\"{k}\"" for k in self.__command)
 
 	def __str__(self):
 		return "Execute: "+(subprocess.list2cmdline(self.__command))

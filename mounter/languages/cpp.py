@@ -2,7 +2,7 @@ from mounter.path import Path
 from typing import List, Dict, Set, Tuple
 import mounter.workspace as workspace
 import mounter.operation as operation
-from mounter.operation import Gate, Command
+from mounter.operation import Gate, Command, Module as OperationModule
 from mounter.workspace import Workspace
 
 class CppGroup:
@@ -40,6 +40,9 @@ class CppProject(workspace.Module):
 		context.add(CppModule)
 		self.__dependencies = tuple(context.add(d) for d in self.__dependencies)
 	
+	def collectSources(self):
+		return self.path.getPreorder()
+
 	def fillGroup(self, group: CppGroup):
 		group.add(self.path, project = True)
 	
@@ -48,6 +51,8 @@ class CppProject(workspace.Module):
 	
 	def run(self, context):
 		cppmod : CppModule = context[CppModule]
+		opmod : OperationModule = context[OperationModule]
+		opmod.add(Gate(produces=self.collectSources()))
 		self._group = cppmod.newGroup()
 		self.fillGroup(self._group)
 		for d in self.__dependencies:
@@ -60,18 +65,14 @@ class ClangGroup(CppGroup):
 		self.objDir = objDir
 		self.binDir = binDir
 		self.dependencies: List[ClangGroup] = [] # List of group dependencies.
-		self.provisions: Set[Path] = set() # Set of input (source) files and directories.
 		self.units: Dict[Path,bool] = {} # Set of main files to compile. Value indicates whether it is a main file.
 		self.includes: Dict[Path,bool] = {} # Include paths. True if dependent groups inherit this.
 		self.libraries: Dict[Path,Path] = {} # Library paths. Value is None for static libraries, otherwise where they need to be moved.
 
-	def add(self,p: Path, project: bool = False, private: bool = False, generated : bool = False):
-		if not generated:
-			self.provisions.add(p)
+	def add(self,p: Path, project: bool = False, private: bool = False):
 		if p.isDirectory():
 			if project:
 				for l in p.getLeaves():
-					self.provisions.add(l)
 					if l.hasExtension("cpp"):
 						self.units[l] = True
 					elif l.hasExtension("hpp"):
@@ -124,8 +125,6 @@ class ClangModule(CppModule):
 	def makeOps(self):
 		dlls = {}
 		for group in self.groups:
-
-			yield operation.Gate(produces=group.provisions)
 
 			group.updateUse()
 			objects = []
