@@ -37,7 +37,7 @@ project = get_project(args.project)
 obj.opCreateDirectories()
 bin.opCreateDirectories()
 
-w.use(hashcache.HashCache(obj.child("hashCache.json")).manifest())
+w.use(hashcache.HashCache(obj.subpath("hashCache.json")).manifest())
 
 def isWantedGoal(state):
 	if isinstance(state,Path):

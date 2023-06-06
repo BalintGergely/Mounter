@@ -3,10 +3,45 @@ from io import TextIOWrapper
 from typing import List, Dict, Set
 import mounter.workspace as workspace
 import shutil
+import zipfile
 from mounter.operation import Operation, Command, Module as OperationModule, uniqueState
 from mounter.languages.cpp import CppModule, CppProject, CppGroup
 from mounter.operation import Gate, Command
 from mounter.workspace import Workspace
+
+MODULE = "module"
+PACKAGE = "package"
+MODULE_INFO = "module info"
+PACKAGE_INFO = "package info"
+SOURCE_FILE = "source file"
+CLASS_FILE = "class file"
+MODULE_HIERARCHY = "module hierarchy"
+CLASS_FILE = "class file"
+JAR_FILE = "jar file"
+
+def detectPathKind(p : Path):
+	subpaths : List[str] = None
+	if p.isFile():
+		if p.hasExtension("jar"):
+			with zipfile.ZipFile(str(p),mode="r") as zip:
+				subpaths = list(zip.namelist())
+			yield JAR_FILE
+		else:
+			pName = p.withExtension(None).getName()
+			if pName == "module-info":
+				yield MODULE_INFO
+			if pName == "package-info":
+				yield PACKAGE_INFO
+			if p.hasExtension("class"):
+				yield CLASS_FILE
+			if p.hasExtension("java"):
+				yield SOURCE_FILE
+		
+	if p.isDirectory():
+		subpaths = [k.relativeTo(p).relativeStr() for k in p.getPreorder()]
+
+	if subpaths is not None:
+		
 
 class JavaGroup:
 	def __init__(self) -> None:
@@ -16,22 +51,17 @@ class JavaGroup:
 		self.classPaths : Set[Path] = set()
 		# Arguments to pass to --source-path (Must be path to package hierarchy root.)
 		self.sourcePaths : Set[Path] = set()
-		# Arguments to pass to --source-module-path (Module sources)
-		self.sourceModulePaths : Set[Path] = set()
 		# List of .java files to compile
 		self.sourceFiles : Set[Path] = set()
 		# Set of annotation processor files and class names. Class name may be null.
 		self.processors : Set[(Path,str)] = set()
 		pass
     
-	def add(self,p: Path, project: bool = False):
+	def add(self,p: Path):
+		# Okay so what is it?
 		if p.isDirectory():
-			if project:
-				for file in p.getLeaves():
-					if file.hasExtension("java"):
-						self.sourceFiles.add(file)
-			else:
-				self.classPaths.add(p)
+			if p.subpath("module-info.java").isPresent():
+
 		if p.isFile():
 			if p.hasExtension("java"):
 				self.sourceFiles.add(file)
@@ -65,8 +95,8 @@ class JavaModule(workspace.Module):
 		commandBase.extend(["-encoding","UTF-8"])
 		commandBase.extend(["-g","-parameters"])
 
-		generatedSourcePath = self.obj.child("src")
-		generatedClassPath = self.obj.child("bin")
+		generatedSourcePath = self.obj.subpath("src")
+		generatedClassPath = self.obj.subpath("bin")
 
 		commandBase.extend(["-s",generatedSourcePath])
 		commandBase.extend(["-d",generatedClassPath])
@@ -84,10 +114,6 @@ class JavaModule(workspace.Module):
 		for sp in group.sourcePaths:
 			commandBase.extend(["--source-path",sp])
 			requiredStates.add(sp)
-		
-		for smp in group.sourceModulePaths:
-			commandBase.extend(["--source-module-path",smp])
-			requiredStates.add(smp)
 
 		twoPass = len(group.processors) > 0
 
@@ -161,7 +187,7 @@ class JavaNatives(workspace.Module):
 		cppmod : CppModule = context[CppModule]
 		opmod : OperationModule = context[OperationModule]
 		javaexe = Path(shutil.which("javac"))
-		javainclude = javaexe.getParent().getParent().child("include")
+		javainclude = javaexe.getParent().getParent().subpath("include")
 
 		group = cppmod.newGroup()
 		group.add(javamod.include)

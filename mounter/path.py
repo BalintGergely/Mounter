@@ -44,13 +44,15 @@ class Path(Hashable):
 			return None
 	
 	def withExtension(self,ext):
+		barePath = self.__p.as_posix()
 		if "." in self.__p.name:
-			pos = self.__p.as_posix()
-			return Path(pos[0:pos.rfind(".")]+"."+ext)
+			barePath = barePath[0:barePath.rfind(".")]
+		if ext is None:
+			return Path(barePath)
 		else:
-			return Path(self.__p.as_posix()+"."+ext)
+			return Path(barePath[0:barePath.rfind(".")]+"."+ext)
 	
-	def isChildPath(self,other: 'Path') -> bool:
+	def isSubpath(self,other: 'Path') -> bool:
 		return str(self).startswith(str(other))
 	
 	def relativeTo(self,other: 'Path') -> 'RelativePath':
@@ -65,8 +67,8 @@ class Path(Hashable):
 	def getName(self) -> str:
 		return self.__p.name
 	
-	def child(self,child : str):
-		return Path(self.__p.as_posix()+"/"+child)
+	def subpath(self,child : str) -> 'RelativePath':
+		return RelativePath(self.__p.as_posix()+"/"+child,child)
 	
 	def opCreateFile(self):
 		self.__p.touch()
@@ -105,7 +107,7 @@ class Path(Hashable):
 	def isPresent(self):
 		return self.__p.exists()
 
-	def getChildren(self) -> Generator['Path']:
+	def getChildren(self):
 		return (Path(p) for p in self.__p.iterdir())
 	
 	def getLeaves(self):
@@ -162,3 +164,6 @@ class RelativePath(Path):
 
 	def moveTo(self,target: Path) -> 'RelativePath':
 		return RelativePath(target.getIr().joinpath(self._subpath),self._subpath)
+	
+	def relativeStr(self):
+		return self._subpath.as_posix()

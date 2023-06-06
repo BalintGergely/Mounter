@@ -145,7 +145,7 @@ class ClangModule(CppModule):
 				preprocessPath = None
 				objectPath = None
 
-				if self.root.isChildPath(inputPath):
+				if self.root.isSubpath(inputPath):
 					outputBase = inputPath.relativeTo(self.root)
 				else:
 					outputBase = inputPath.relativeToParent()
