@@ -185,26 +185,28 @@ class Copy(Operation):
 	def __str__(self):
 		return "Copy: "+str(self.__source)+"\nTo: "+str(self.__target)
 
-class CreateDirectory(Operation):
+class CreateDirectories(Operation):
 	'''
 	Operation that creates an empty directory.
 	'''
-	__directory: Path
+	__directories: Tuple[Path]
 	__empty: bool
 
-	def __init__(self, directory: Path, empty: bool = False):
-		self.__directory = directory
+	def __init__(self, *directories: Path, empty: bool = False):
+		self.__directories = tuple(directories)
 		self.__empty = empty
 	
 	def run(self):
-		if self.__directory.isDirectory():
-			if self.__empty:
-				self.__directory.opClearDirectory()
-		else:
-			self.__directory.opCreateDirectories()
+		for d in self.__directories:
+			if d.isDirectory():
+				if self.__empty:
+					for file in d.getPostorder(includeSelf=False):
+						file.opDelete()
+			else:
+				d.opCreateDirectories()
 	
 	def getResultStates(self) -> Iterable:
-		yield self.__directory
+		yield self.__directories
 
 class Cluster(Operation):
 	'''

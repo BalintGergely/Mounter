@@ -10,7 +10,6 @@ import mounter.workspace as workspace
 class HashCache:
 	'''
 	A JSON serialized HashCache to use for checking state changes between builds.
-
 	'''
 	__table: Dict[str,Dict[str,str]] # The table, as loaded from the cache file. This never changes.
 	__tableFile: Path # Location of the table file.
@@ -86,7 +85,7 @@ class HashCache:
 				checker = hashlib.sha1()
 				for wil in wils:
 					if wil.getName() == "__pycache__":
-						continue # Exclude pycache.
+						continue # Ignore pycache.
 					checker.update(str(wil).encode())
 					checker.update(b"\0")
 					checker.update(self.computeStateHash(wil).encode())

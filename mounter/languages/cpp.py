@@ -46,17 +46,19 @@ class CppProject(workspace.Module):
 	def fillGroup(self, group: CppGroup):
 		group.add(self.path, project = True)
 	
-	def group(self):
+	def cppGroup(self):
 		return self._group
 	
 	def run(self, context):
 		cppmod : CppModule = context[CppModule]
 		opmod : OperationModule = context[OperationModule]
-		opmod.add(Gate(produces=self.collectSources()))
+		sources = self.collectSources()
+		if sources is not None:
+			opmod.add(Gate(produces=sources))
 		self._group = cppmod.newGroup()
 		self.fillGroup(self._group)
 		for d in self.__dependencies:
-			self._group.use(d.group())
+			self._group.use(d.cppGroup())
 
 class ClangGroup(CppGroup):
 

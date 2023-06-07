@@ -76,7 +76,7 @@ class Workspace:
 	No more modules may be added beyond this point.
 
 	In Execution phase, run() is invoked for all modules in the order they
-	appear in the list.
+	appear in the list. Modules may also opt to do a cleanup action after all their dependents have run.
 	'''
 	__inactiveModules : Dict[Tuple,Module]
 	__activeModules: Dict[Tuple,Module]

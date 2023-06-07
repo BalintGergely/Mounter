@@ -2,6 +2,7 @@
 import argparse
 import mounter.operation as operation
 import mounter.languages.cpp as cpp
+import mounter.languages.java as java
 import mounter.hashcache as hashcache
 import importlib
 from typing import Iterable
@@ -53,11 +54,14 @@ opm: operation.Module = w.use(operation.Selective(
 	useHashCache = True
 ))
 
-cppManifest = w.use(cpp.ClangModule(root=root,obj=obj,bin=bin))
+cppManifest = w.use(cpp.ClangModule(root=root,obj=obj.subpath("cpp"),bin=bin))
 
 cppManifest.assemble = args.disassembly
 cppManifest.debug = args.debug
 cppManifest.optimalize = args.optimalize
+
+javaManifest = w.use(java.Module(root=root,obj=obj.subpath("java"),include=obj.subpath("javaInclude"),bin=bin))
+javaManifest.debug = args.debug
 
 w.add(project)
 

@@ -87,13 +87,11 @@ class Path(Hashable):
 	def opDeleteDirectory(self):
 		self.__p.rmdir()
 	
-	def opClearDirectory(self):
-		for file in list(self.getChildren()):
-			if file.isDirectory():
-				file.opClearDirectory()
-				file.opDeleteDirectory()
-			if file.isFile():
-				file.opDeleteFile()
+	def opDelete(self):
+		if self.isDirectory():
+			self.opDeleteDirectory()
+		elif self.isFile():
+			self.opDeleteFile()
 	
 	def opCopyTo(self,other : 'Path'):
 		shutil.copy(src=str(self),dst=str(other))
@@ -117,17 +115,19 @@ class Path(Hashable):
 			if f.isDirectory():
 				yield from f.getLeaves()
 	
-	def getPreorder(self):
-		for f in self.getChildren():
-			yield f
-			if f.isDirectory():
+	def getPreorder(self,includeSelf = True):
+		if includeSelf:
+			yield self
+		if self.isDirectory():
+			for f in self.getChildren():
 				yield from f.getPreorder()
 	
-	def getPostorder(self):
-		for f in self.getChildren():
-			if f.isDirectory():
+	def getPostorder(self,includeSelf = True):
+		if self.isDirectory():
+			for f in self.getChildren():
 				yield from f.getPostorder()
-			yield f
+		if includeSelf:
+			yield self
 	
 	def open(self,flags,encoding : str = None):
 		f = set()

@@ -2,46 +2,16 @@ from mounter.path import Path
 from io import TextIOWrapper
 from typing import List, Dict, Set
 import mounter.workspace as workspace
+import struct
 import shutil
 import zipfile
-from mounter.operation import Operation, Command, Module as OperationModule, uniqueState
+from mounter.operation import Operation, Command, CreateDirectories, Module as OperationModule, Cluster, uniqueState
 from mounter.languages.cpp import CppModule, CppProject, CppGroup
 from mounter.operation import Gate, Command
 from mounter.workspace import Workspace
 
-MODULE = "module"
-PACKAGE = "package"
-MODULE_INFO = "module info"
-PACKAGE_INFO = "package info"
-SOURCE_FILE = "source file"
-CLASS_FILE = "class file"
-MODULE_HIERARCHY = "module hierarchy"
-CLASS_FILE = "class file"
-JAR_FILE = "jar file"
-
-def detectPathKind(p : Path):
-	subpaths : List[str] = None
-	if p.isFile():
-		if p.hasExtension("jar"):
-			with zipfile.ZipFile(str(p),mode="r") as zip:
-				subpaths = list(zip.namelist())
-			yield JAR_FILE
-		else:
-			pName = p.withExtension(None).getName()
-			if pName == "module-info":
-				yield MODULE_INFO
-			if pName == "package-info":
-				yield PACKAGE_INFO
-			if p.hasExtension("class"):
-				yield CLASS_FILE
-			if p.hasExtension("java"):
-				yield SOURCE_FILE
-		
-	if p.isDirectory():
-		subpaths = [k.relativeTo(p).relativeStr() for k in p.getPreorder()]
-
-	if subpaths is not None:
-		
+def manifest():
+	return Module()
 
 class JavaGroup:
 	def __init__(self) -> None:
@@ -53,23 +23,39 @@ class JavaGroup:
 		self.sourcePaths : Set[Path] = set()
 		# List of .java files to compile
 		self.sourceFiles : Set[Path] = set()
-		# Set of annotation processor files and class names. Class name may be null.
+		# Set of annotation processor source files and class names. Either may be None.
 		self.processors : Set[(Path,str)] = set()
 		pass
     
-	def add(self,p: Path):
-		# Okay so what is it?
-		if p.isDirectory():
-			if p.subpath("module-info.java").isPresent():
-
-		if p.isFile():
-			if p.hasExtension("java"):
-				self.sourceFiles.add(file)
+	def addModulePath(self,p: Path):
+		self.modulePaths.add(p)
+	
+	def addClassPath(self,p: Path):
+		self.classPaths.add(p)
+	
+	def addSourcePath(self,p: Path):
+		self.sourcePaths.add(p)
+	
+	def addSourceFiles(self,p: Path):
+		for f in p.getLeaves():
+			if f.hasExtension("java"):
+				self.sourceFiles.add(f)
+	
+	def addSourceFile(self,p: Path):
+		self.sourceFiles.add(p)
+	
+	def addProcessor(self,source: Path = None,name: str = None):
+		self.processors.add((source,name))
         
 	def use(self,c: 'JavaGroup'):
 		pass
 
-class JavaModule(workspace.Module):
+class JavaProject(workspace.Module):
+	def __init__(self, projectFile: str):
+		super().__init__(projectFile)
+		self.path = Path(projectFile).getParent()
+
+class Module(workspace.Module):
 	def __init__(self, root = Path(""), obj = Path("obj/java"), include = Path("obj/java/CppInclude"),bin = Path("bin")):
 		super().__init__(key = __file__)
 		self.groups: List[JavaGroup] = []
@@ -77,6 +63,8 @@ class JavaModule(workspace.Module):
 		self.obj = obj
 		self.bin = bin
 		self.include = include
+		self.debug = False
+		self.reflect = True
 		self.__theGroup = JavaGroup()
 	
 	def newGroup(self):
@@ -85,15 +73,20 @@ class JavaModule(workspace.Module):
 	def run(self, context):
 		context.run()
 		opmod: OperationModule = context[OperationModule]
-		for op in self.makeOps():
-			opmod.add(op)
+		opmod.add(self.makeCompileOperation())
 	
-	def makeOps(self):
+	def makeCompileOperation(self):
 		group = self.__theGroup
 
 		commandBase = ["java"]
 		commandBase.extend(["-encoding","UTF-8"])
-		commandBase.extend(["-g","-parameters"])
+		if self.debug:
+			commandBase.append("-g")
+		else:
+			commandBase.append("-g:none")
+		
+		if self.reflect:
+			commandBase.extend("-parameters")
 
 		generatedSourcePath = self.obj.subpath("src")
 		generatedClassPath = self.obj.subpath("bin")
@@ -117,81 +110,83 @@ class JavaModule(workspace.Module):
 
 		twoPass = len(group.processors) > 0
 
-		commands = list()
+		opSequence = list()
 
-		finalResultStates = [generatedClassPath,generatedSourcePath,self.include]
+		opSequence.append(CreateDirectories(generatedClassPath,generatedSourcePath,self.include,empty = True))
 
 		if twoPass:
 			firstPass = list(commandBase)
 			secondPass = list(commandBase)
 
 			firstPass.append("-proc:none")
-			for (f,c) in group.processors:
-				if c is not None:
-					secondPass.extend(["-processor",c])
 			
-			secondPass.append("-implicit:none")
 			secondPass.extend(["-h",self.include])
 
 			firstPassPaths = set()
 			for (f,c) in group.processors:
-				firstPassPaths.add(f)
+				if f is not None:
+					firstPassPaths.add(f)
 				if c is not None:
 					secondPass.extend(["-processor",c])
 			
 			secondPass.extend(group.sourceFiles)
 			firstPass.extend(firstPassPaths)
 
-			commands.append(Command(*firstPass))
-			commands.append(Command(*secondPass))
+			opSequence.append(Command(*firstPass))
+			opSequence.append(Command(*secondPass))
 		else:
 			secondPass = list(commandBase)
 			secondPass.append("-proc:none")
-			secondPass.append("-implicit:none")
 			secondPass.extend(["-h",self.include])
 			secondPass.extend(group.sourceFiles)
-			commands.append(Command(*secondPass))
+			opSequence.append(Command(*secondPass))
 
-		intermediateState = None
+		intermediateStateTuple = None
 
-		for (index,command) in enumerate(commands):
+		finalSequence = list()
+
+		for (index,command) in enumerate(opSequence):
 			isFirst = index == 0
-			isLast = index == len(commands)-1
-
-			localRequiredStates = list(requiredStates)
+			isLast = index == len(opSequence)-1
 			
-			if not isFirst:
-				localRequiredStates.append(intermediateState)
+			if isFirst:
+				localRequiredStates = requiredStates
+			else:
+				localRequiredStates = intermediateStateTuple
 
-			localResultStates = None
+			localResultStates = ()
 
 			if isLast:
-				localResultStates = finalResultStates
+				localResultStates = ()
 			else:
-				intermediateState = uniqueState("java compile step")
-				localResultStates = [intermediateState]
+				intermediateStateTuple = (uniqueState("java compile step"),)
+				localResultStates = intermediateStateTuple
+			
+			finalSequence.append(Gate(requires=localRequiredStates,produces=localResultStates,internal=command))
+		
+		return Cluster(finalSequence)
 
-			yield Gate(requires=localRequiredStates,produces=localResultStates,internal=command)
-
-class JavaNatives(workspace.Module):
+class NativeHeaders(workspace.Module):
 	def __init__(self, key):
 		super().__init__(key = (__file__,"nativecpp"))
 	
 	def activate(self, context: Workspace):
 		context.add(OperationModule)
 		context.add(CppModule)
-		context.add(JavaModule)
+		context.add(Module)
 
 	def run(self, context: Workspace):
-		javamod : JavaModule = context[JavaModule]
+		javamod : Module = context[Module]
 		cppmod : CppModule = context[CppModule]
 		opmod : OperationModule = context[OperationModule]
 		javaexe = Path(shutil.which("javac"))
 		javainclude = javaexe.getParent().getParent().subpath("include")
 
-		group = cppmod.newGroup()
-		group.add(javamod.include)
-		group.add(javainclude)
+		self._group = cppmod.newGroup()
+		self._group.add(javamod.include)
+		self._group.add(javainclude)
 
 		opmod.add(Gate(produces=[javainclude]))
-
+	
+	def cppGroup(self):
+		return self._group
