@@ -65,6 +65,8 @@ class Module(workspace.Module):
 		self.include = include
 		self.debug = False
 		self.reflect = True
+	
+	def activate(self, context: Workspace):
 		self.__theGroup = JavaGroup()
 	
 	def newGroup(self):
@@ -166,7 +168,7 @@ class Module(workspace.Module):
 		
 		return Cluster(finalSequence)
 
-class NativeHeaders(workspace.Module):
+class Native(workspace.Module):
 	def __init__(self, key):
 		super().__init__(key = (__file__,"nativecpp"))
 	

@@ -50,7 +50,7 @@ class Path(Hashable):
 		if ext is None:
 			return Path(barePath)
 		else:
-			return Path(barePath[0:barePath.rfind(".")]+"."+ext)
+			return Path(barePath+"."+ext)
 	
 	def isSubpath(self,other: 'Path') -> bool:
 		return str(self).startswith(str(other))

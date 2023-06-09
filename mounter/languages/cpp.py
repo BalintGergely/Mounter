@@ -62,12 +62,11 @@ class CppProject(workspace.Module):
 
 class ClangGroup(CppGroup):
 
-	def __init__(self, rootDir: Path, objDir: Path, binDir):
+	def __init__(self, rootDir: Path, binDir: Path):
 		self.rootDir = rootDir
-		self.objDir = objDir
 		self.binDir = binDir
 		self.dependencies: List[ClangGroup] = [] # List of group dependencies.
-		self.units: Dict[Path,bool] = {} # Set of main files to compile. Value indicates whether it is a main file.
+		self.units: Dict[Path,bool] = {} # Set of files to compile. Value indicates whether it is a main file.
 		self.includes: Dict[Path,bool] = {} # Include paths. True if dependent groups inherit this.
 		self.libraries: Dict[Path,Path] = {} # Library paths. Value is None for static libraries, otherwise where they need to be moved.
 
@@ -99,12 +98,13 @@ class ClangGroup(CppGroup):
 		self.dependencies.append(c)
 
 class ClangModule(CppModule):
-	def __init__(self, root = Path(""), obj = Path("obj/cpp"), bin = Path("bin")):
+	def __init__(self, root = Path(""), obj = Path("obj/bin"), src = Path("obj/cpp"), bin = Path("bin")):
 		super().__init__()
 		self.groups: List[ClangGroup] = []
 		self.root = root
 		self.obj = obj
 		self.bin = bin
+		self.src = src
 		self.preprocess = True
 		self.assemble = False
 		self.debug = False
@@ -143,18 +143,17 @@ class ClangModule(CppModule):
 			# Generate commands to compile each object file.
 			
 			for (inputPath,isMain) in group.units.items():
-				outputBase = None
+				inputRelative = None
 				preprocessPath = None
 				objectPath = None
 
 				if self.root.isSubpath(inputPath):
-					outputBase = inputPath.relativeTo(self.root)
+					inputRelative = inputPath.relativeTo(self.root)
 				else:
-					outputBase = inputPath.relativeToParent()
+					inputRelative = inputPath.relativeToParent()
 				
-				outputBase = outputBase.moveTo(self.obj)
-				preprocessPath = outputBase.withExtension("cpp")
-				objectPath = outputBase.withExtension("ll" if self.assemble else "o")
+				preprocessPath = inputRelative.moveTo(self.src).withExtension("cpp")
+				objectPath = inputRelative.moveTo(self.obj).withExtension("ll" if self.assemble else "o")
 				
 				cmd = ["clang++",inputPath] + compileArgs
 				req = set(group.includes)

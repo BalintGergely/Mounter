@@ -24,7 +24,7 @@ class Operation:
 		return self.run()
 	
 	def run(self):
-		assert False, "srun() method has not been overridden for type"+type(self)
+		assert False, "run() method has not been overridden for type"+type(self)
 		
 	def opHash(self):
 		assert False, "opHash() method has not been overridden for type"+type(self)
