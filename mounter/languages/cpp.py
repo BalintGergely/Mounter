@@ -111,7 +111,7 @@ class ClangModule(CppModule):
 		self.optimalize = False
 	
 	def newGroup(self):
-		c = ClangGroup(self.root, self.obj, self.bin)
+		c = ClangGroup(self.root, self.bin)
 		self.groups.append(c)
 		return c
 	
