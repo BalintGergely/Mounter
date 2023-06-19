@@ -119,8 +119,8 @@ class Gate(Operation):
 		if self.__name is not None:
 			definition = "\"{}\": ".format(self.__name)
 		if self.__internal is not None:
-			return definition + str(self.__internal)
-		definition = "\n".join([definition+"Input: "+str(f) for f in self.__result]+[definition+"Output: "+str(f) for f in self.__required])
+			return definition + str(self.__internal).replace("\n","\n"+definition)
+		definition = "\n".join([definition+"Output: "+str(f) for f in self.__result]+[definition+"Input: "+str(f) for f in self.__required])
 		#if self.__internal is not None:
 		#	definition = definition + "\n" + str(self.__internal)
 		if self.__goal:
@@ -206,7 +206,19 @@ class CreateDirectories(Operation):
 				d.opCreateDirectories()
 	
 	def getResultStates(self) -> Iterable:
-		yield self.__directories
+		return self.__directories
+
+	def opHash(self):
+		if self.__empty: # Whatever works.
+			return ";".join("mkdir -p --clean {}".format(p) for p in sorted(self.__directories))
+		else:
+			return ";".join("mkdir -p {}".format(p) for p in sorted(self.__directories))
+
+	def __str__(self) -> str:
+		if self.__empty:
+			return "\n".join("Create empty directory: {}".format(p) for p in self.__directories)
+		else:
+			return "\n".join("Create directory: {}".format(p) for p in self.__directories)
 
 class Cluster(Operation):
 	'''
@@ -288,6 +300,46 @@ class Cluster(Operation):
 		l.sort()
 		return "\n".join(l)
 
+	def __str__(self) -> str:
+		return "\n".join(str(h) for h in self.__operations)
+
+class Sequence(Operation):
+	'''
+	An operation that performs the given set of operations in sequence.
+	'''
+	def __init__(self,all: Iterable[Operation]) -> None:
+		self.__operations = tuple(all)
+		self.__resultStates = set()
+		self.__requiredStates = set()
+		for op in self.__operations:
+			for required in op.getRequiredStates():
+				if required not in self.__resultStates:
+					self.__requiredStates.add(required)
+			for result in op.getResultStates():
+				assert result not in self.__requiredStates, "Bad order of operations in a Sequence!"
+				assert result not in self.__resultStates, "Cannot have multiple operations producing the same state!"
+				self.__resultStates.add(result)
+	
+	def getRequiredStates(self) -> Iterable[Path]:
+		yield from self.__requiredStates
+	
+	def getResultStates(self) -> Iterable[Path]:
+		yield from self.__resultStates
+	
+	async def runAsync(self):
+		for op in self.__operations:
+			await op.runAsync()
+	
+	def run(self):
+		for op in self.__operations:
+			op.run()
+	
+	def opHash(self):
+		return "\n".join("[{}]".format(h.opHash()) for h in self.__operations)
+
+	def __str__(self) -> str:
+		return "\n".join(str(h) for h in self.__operations)
+
 class Command(Operation):
 	'''Operation to run an asyncio command.'''
 	__command: Tuple[str]
@@ -325,7 +377,7 @@ class Module(workspace.Module):
 	__ops: List[Operation]
 
 	def __init__(self,useAsync = False):
-		super().__init__(key = __file__)
+		super().__init__(key = (__file__,))
 		self.__useAsync = useAsync
 	
 	def activate(self, context):

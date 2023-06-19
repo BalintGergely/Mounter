@@ -1,7 +1,7 @@
 import pathlib
 import shutil
 from io import TextIOWrapper
-from typing import Hashable, Final, Generator
+from typing import Hashable, Final, Generator, List
 
 class Path(Hashable):
 	'''
@@ -128,6 +128,20 @@ class Path(Hashable):
 				yield from f.getPostorder()
 		if includeSelf:
 			yield self
+	
+	def getBreadthFirst(self,includeSelf = True):
+		queue : List[Path] = list()
+
+		if includeSelf:
+			queue.append(self)
+		elif self.isDirectory():
+			queue.extend(self.getChildren())
+		
+		while len(queue) != 0:
+			file = queue.pop(0)
+			yield file
+			if file.isDirectory():
+				queue.extend(file.getChildren())
 	
 	def open(self,flags,encoding : str = None):
 		f = set()

@@ -1,5 +1,6 @@
 from mounter.path import Path
 from typing import List, Dict, Set, Tuple
+from shutil import which
 import mounter.workspace as workspace
 import mounter.operation as operation
 from mounter.operation import Gate, Command, Module as OperationModule
@@ -108,6 +109,7 @@ class ClangModule(CppModule):
 		self.preprocess = True
 		self.assemble = False
 		self.debug = False
+		self.useLLVM = None
 		self.optimalize = False
 	
 	def newGroup(self):
@@ -126,12 +128,24 @@ class ClangModule(CppModule):
 	
 	def makeOps(self):
 		dlls = {}
+
+		useLLVM = self.useLLVM
+
+		if useLLVM is None:
+			if which("lld") != None:
+				useLLVM = True
+			else:
+				useLLVM = False
+
 		for group in self.groups:
 
 			group.updateUse()
 			objects = []
 			mains: List[Path] = []
 			compileArgs = ["-std=c++20","-Wc++17-extensions"]
+			
+			if useLLVM:
+				compileArgs.append("-fuse-ld=lld")
 
 			if(self.debug):
 				compileArgs.append("-g")
@@ -153,7 +167,21 @@ class ClangModule(CppModule):
 					inputRelative = inputPath.relativeToParent()
 				
 				preprocessPath = inputRelative.moveTo(self.src).withExtension("cpp")
-				objectPath = inputRelative.moveTo(self.obj).withExtension("ll" if self.assemble else "o")
+
+				extension = None
+
+				if self.assemble:
+					if useLLVM:
+						extension = "ll"
+					else:
+						extension = "asm"
+				else:
+					if useLLVM:
+						extension = "bc"
+					else:
+						extension = "o"
+
+				objectPath = inputRelative.moveTo(self.obj).withExtension(extension)
 				
 				cmd = ["clang++",inputPath] + compileArgs
 				req = set(group.includes)
@@ -173,7 +201,11 @@ class ClangModule(CppModule):
 					cmd.append("--assemble")
 				else:
 					cmd.append("--compile")
-				cmd.extend(["-emit-llvm","-o",objectPath])
+				
+				if useLLVM:
+					cmd.append("-emit-llvm")
+				
+				cmd.extend(["-o",objectPath])
 				yield Gate(requires=req,produces=[objectPath],internal=Command(*cmd))
 
 				if isMain:
