@@ -33,8 +33,11 @@ if args.hustle:
 		print("Halting because non-empty input string given")
 		exit()
 
-def get_project(project):
-	project_string = project+".project"
+def get_project(project : str):
+	if project == ".":
+		project_string = "project"
+	else:
+		project_string = project+".project"
 	
 	module = importlib.import_module(project_string)
 	

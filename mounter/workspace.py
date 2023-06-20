@@ -78,16 +78,12 @@ class Workspace:
 	In Execution phase, run() is invoked for all modules in the order they
 	appear in the list. Modules may also opt to do a cleanup action after all their dependents have run.
 	'''
-	__inactiveModules : Dict[Tuple,Module]
-	__activeModules: Dict[Tuple,Module]
-	__topology: List[Module]
-	__topologyIndex: int
 
 	def __init__(self):
-		self.__activeModules = {}
-		self.__inactiveModules = {}
-		self.__topology = []
-		self.__topologyIndex = 0
+		self.__activeModules : Dict[Tuple,Module] = {}
+		self.__inactiveModules : Dict[Tuple,Module] = {}
+		self.__topology : List[Module] = []
+		self.__topologyIndex : int = 0
 		pass
 	
 	def __getitem__(self,mod: T) -> T:
@@ -115,6 +111,13 @@ class Workspace:
 
 		return mod
 	
+	def append(self, fnc):
+		'''
+		Appends a custom function to be executed directly after the run invocation of currently active modules.
+		Can be used both in the discovery and execution phase. The function's only argument will be this workspace.
+		'''
+		self.__topology.append(type("AppendHook",(),{"run": fnc}))
+	
 	def add(self,mod: T) -> T:
 		'''
 		Register and activate the specific module.
@@ -134,4 +137,3 @@ class Workspace:
 			self.__topology.append(mod)
 			self.__activeModules[key] = mod
 			return mod
-
