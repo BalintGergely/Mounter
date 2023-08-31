@@ -51,12 +51,14 @@ class JavaGroup:
 		pass
 
 class JavaProject(workspace.Module):
-	def __init__(self, projectFile: str):
+	def __init__(self, projectFile: str, *dependencies):
 		super().__init__((projectFile,))
 		self.path = Path(projectFile).getParent()
+		self.__dependencies = tuple(dependencies)
 	
 	def activate(self, context: Workspace):
 		context.add(Module)
+		self.__dependencies = tuple(context.add(d) for d in self.__dependencies)
 	
 	def collectSources(self):
 		return self.path.getPreorder()

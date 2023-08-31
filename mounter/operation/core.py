@@ -117,7 +117,7 @@ class Gate(Operation):
 	def __str__(self):
 		definition = ""
 		if self.__name is not None:
-			definition = "\"{}\": ".format(self.__name)
+			definition = f"\"{self.__name}\": "
 		if self.__internal is not None:
 			return definition + str(self.__internal).replace("\n","\n"+definition)
 		definition = "\n".join([definition+"Output: "+str(f) for f in self.__result]+[definition+"Input: "+str(f) for f in self.__required])
@@ -180,7 +180,7 @@ class Copy(Operation):
 		self.__source.opCopyTo(self.__target)
 	
 	def opHash(self):
-		return "cat {} > {}".format(self.__source,self.__target)
+		return f"cat {self.__source} > {self.__target}"
 	
 	def __str__(self):
 		return "Copy: "+str(self.__source)+"\nTo: "+str(self.__target)
@@ -210,15 +210,15 @@ class CreateDirectories(Operation):
 
 	def opHash(self):
 		if self.__empty: # Whatever works.
-			return ";".join("mkdir -p --clean {}".format(p) for p in sorted(self.__directories))
+			return ";".join(f"mkdir -p --clean {p}" for p in sorted(self.__directories))
 		else:
-			return ";".join("mkdir -p {}".format(p) for p in sorted(self.__directories))
+			return ";".join(f"mkdir -p {p}" for p in sorted(self.__directories))
 
 	def __str__(self) -> str:
 		if self.__empty:
-			return "\n".join("Create empty directory: {}".format(p) for p in self.__directories)
+			return "\n".join(f"Create empty directory: {p}" for p in self.__directories)
 		else:
-			return "\n".join("Create directory: {}".format(p) for p in self.__directories)
+			return "\n".join(f"Create directory: {p}" for p in self.__directories)
 
 class Cluster(Operation):
 	'''
@@ -234,7 +234,7 @@ class Cluster(Operation):
 		for (index,op) in enumerate(self.__operations):
 			self.__requiredStates.update(op.getRequiredStates())
 			for state in op.getResultStates():
-				assert state not in self.__resultStates, "Cannot have multiple operations producing the same state!"
+				assert state not in self.__resultStates, f"Duplicate state {state}"
 				self.__resultStates[state] = index
 		
 		self.__requiredStates.difference_update(self.__resultStates.keys())
@@ -296,7 +296,7 @@ class Cluster(Operation):
 				t.run()
 	
 	def opHash(self):
-		l = ["[{}]".format(h.opHash()) for h in self.__operations]
+		l = [f"[{h.opHash()}]" for h in self.__operations]
 		l.sort()
 		return "\n".join(l)
 
@@ -305,7 +305,7 @@ class Cluster(Operation):
 
 class Sequence(Operation):
 	'''
-	An operation that performs the given set of operations in sequence.
+	An operation that performs the given list of operations in sequence.
 	'''
 	def __init__(self,all: Iterable[Operation]) -> None:
 		self.__operations = tuple(all)
@@ -317,7 +317,7 @@ class Sequence(Operation):
 					self.__requiredStates.add(required)
 			for result in op.getResultStates():
 				assert result not in self.__requiredStates, "Bad order of operations in a Sequence!"
-				assert result not in self.__resultStates, "Cannot have multiple operations producing the same state!"
+				assert result not in self.__resultStates, f"Duplicate state {result}"
 				self.__resultStates.add(result)
 	
 	def getRequiredStates(self) -> Iterable[Path]:
@@ -335,7 +335,7 @@ class Sequence(Operation):
 			op.run()
 	
 	def opHash(self):
-		return "\n".join("[{}]".format(h.opHash()) for h in self.__operations)
+		return "\n".join(f"[{h.opHash()}]" for h in self.__operations)
 
 	def __str__(self) -> str:
 		return "\n".join(str(h) for h in self.__operations)

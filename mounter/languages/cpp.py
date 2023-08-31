@@ -35,7 +35,7 @@ class CppProject(workspace.Module):
 	def __init__(self, projectFile, *dependencies):
 		super().__init__(projectFile)
 		self.path = Path(projectFile).getParent()
-		self.__dependencies : Tuple[CppProject] = tuple(dependencies)
+		self.__dependencies = tuple(dependencies)
 	
 	def activate(self, context: workspace.Workspace):
 		context.add(CppModule)
