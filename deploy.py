@@ -17,12 +17,14 @@ if response.lower() != 'y':
 	print("Operation canceled.")
 	exit()
 
+for t in targetPath.getParents(includeSelf=True):
+	if not t.isDirectory():
+		t.opCreateDirectory()
+		print(f"[created {t}]")
+
 for f in list(targetPath.getPostorder(includeSelf=False)):
 	f.opDelete()
 	print(f"[deleted {f}]")
-
-if not targetPath.isDirectory():
-	targetPath.opCreateDirectory()
 
 for m in mounterPath.getPreorder(includeSelf=False):
 	m = m.relativeTo(mounterPath)

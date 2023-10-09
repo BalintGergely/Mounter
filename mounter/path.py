@@ -61,8 +61,11 @@ class Path(Hashable):
 	def relativeToParent(self) -> 'RelativePath':
 		return self.relativeTo(self.getParent())
 	
-	def getParent(self,times: int = 1) -> 'Path':
-		return Path(self.__p.parent)
+	def getParent(self) -> 'Path':
+		pt = self.__p.parent
+		if pt == self.__p:
+			return None
+		return Path(pt)
 	
 	def getName(self) -> str:
 		return self.__p.name
@@ -108,6 +111,13 @@ class Path(Hashable):
 	def getChildren(self):
 		return (Path(p) for p in self.__p.iterdir())
 	
+	def getParents(self,includeSelf = False):
+		p = self.getParent()
+		if p is not None:
+			yield from p.getParents(includeSelf=True)
+		if includeSelf:
+			yield self
+
 	def getLeaves(self):
 		for f in self.getChildren():
 			if f.isFile():
