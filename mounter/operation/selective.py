@@ -20,13 +20,13 @@ class Selective(operation.Module):
 			context.add(hashcache)
 		return super().activate(context)
 	
-	def runOperation(self, context, operation):
+	def _runOperation(self, context, operation):
 
 		for pt in (p for p in operation.getResultStates() if isinstance(p,Path)):
 			pt : Path
 			pt.getParent().opCreateDirectories()
 
-		super().runOperation(context, operation)
+		super()._runOperation(context, operation)
 
 	def filterOperations(self, operations, context : Workspace):
 		if self.goalStatePred is not None:

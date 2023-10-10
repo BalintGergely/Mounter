@@ -374,21 +374,21 @@ class Command(Operation):
 		return "Execute: "+(subprocess.list2cmdline(self.__command))
 
 class Module(workspace.Module):
-	__ops: List[Operation]
 
 	def __init__(self,useAsync = False):
-		super().__init__(key = (__file__,))
+		super().__init__(key = __file__)
 		self.__useAsync = useAsync
 	
 	def activate(self, context):
 		if self.__useAsync:
 			context.add(workspace.Asyncio)
-		self.__ops = []
+		self.__ops: List[Operation] = []
+		self.__res: Dict[str,workspace.Module] = {}
 	
 	def filterOperations(self, operations: List[Operation], context):
 		return operations
 	
-	def runOperation(self, context, operation):
+	def _runOperation(self, context, operation):
 		if self.__useAsync:
 			context[workspace.Asyncio].wait(operation.runAsync())
 		else:
@@ -396,14 +396,26 @@ class Module(workspace.Module):
 	
 	def run(self, context):
 
+		self.__context = context
+
 		context.run()
 
 		end = Cluster(self.filterOperations(self.__ops, context))
 		f = list(end.getRequiredStates())
 		assert len(f) == 0, "\n".join(["Required states have not been accounted for:"]+[str(k) for k in f])
-		self.runOperation(context, end)
+		self._runOperation(context, end)
 
 		self.__ops = None
 	
 	def add(self,op: Operation):
 		self.__ops.append(op)
+		for r in op.getResultStates():
+			# It is best to catch an error like this here and now.
+			if r in self.__res:
+				prevMod = self.__res[r]
+				nowMod = self.__context.getCurrentExecutingModule()
+				if prevMod is nowMod:
+					raise Exception(f"Duplicate state {r}, registered by module {prevMod}")
+				else:
+					raise Exception(f"Duplicate state {r}, registered by module {prevMod} then {nowMod}")
+			self.__res[r] = self.__context.getCurrentExecutingModule()

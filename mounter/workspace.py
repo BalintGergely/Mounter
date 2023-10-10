@@ -6,7 +6,7 @@ class Module:
 	__key: Final
 	def __init__(self,key):
 		'''key is typically some unique identification of the Module.'''
-		self.__key = tuple(key)
+		self.__key = key
 
 	@final
 	def key(self):
@@ -28,6 +28,9 @@ class Module:
 		clean up afterwards.
 		'''
 		pass
+
+	def __str__(self) -> str:
+		return f"Module(type = {type(self)},key = {self.__key})"
 
 	@classmethod
 	@final
@@ -60,6 +63,11 @@ class Asyncio(Module):
 
 T = TypeVar("T", bound=Module)
 
+class AppendHook():
+	def __init__(self,fnc,mod) -> None:
+		self.run = fnc
+		self.parent = mod
+
 class Workspace:
 	'''
 	A flow controller between a set of dependent 'Modules'.
@@ -84,6 +92,7 @@ class Workspace:
 		self.__inactiveModules : Dict[Tuple,Module] = {}
 		self.__topology : List[Module] = []
 		self.__topologyIndex : int = 0
+		self.__runningModule = None
 		pass
 	
 	def __getitem__(self,mod: T) -> T:
@@ -91,13 +100,23 @@ class Workspace:
 		realMod = self.__activeModules[mod.manifest().key()]
 		assert realMod is not None
 		return realMod
+
+	def getCurrentExecutingModule(self):
+		'''Returns the module which is currently running. Used for debugging.'''
+		return self.__runningModule
 	
 	def run(self):
 		'''Begin or continue executing modules.'''
+		mc = self.__runningModule
 		while self.__topologyIndex < len(self.__topology):
 			module = self.__topology[self.__topologyIndex]
 			self.__topologyIndex += 1
+			if isinstance(module,AppendHook):
+				self.__runningModule = module.parent
+			else:
+				self.__runningModule = module
 			module.run(self)
+		self.__runningModule = mc
 	
 	def use(self,mod : Module):
 		'''
@@ -116,7 +135,7 @@ class Workspace:
 		Appends a custom function to be executed directly after the run invocation of currently active modules.
 		Can be used both in the discovery and execution phase. The function's only argument will be this workspace.
 		'''
-		self.__topology.append(type("AppendHook",(),{"run": fnc}))
+		self.__topology.append(AppendHook(fnc, self.__runningModule))
 	
 	def add(self,mod: T) -> T:
 		'''

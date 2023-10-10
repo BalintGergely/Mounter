@@ -38,7 +38,7 @@ class HashCache:
 		Save the hashcache.
 		'''
 		assert self.__table is not None, "Hash cache was never loaded!"
-		savedTable= {}
+		savedTable = {}
 		for k,v in chain(self.__table.items(),self.__witness.items()):
 			if k in savedTable:
 				savedTable[k].update(v)

@@ -1,6 +1,8 @@
-from mounter.path import Path
-from typing import List, Dict, Set, Tuple
+
+from mounter.path import Path, RelativePath
+from typing import List, Dict, Set, Tuple, Iterable
 from shutil import which
+import itertools
 import mounter.workspace as workspace
 import mounter.operation as operation
 from mounter.operation import Gate, Command, Module as OperationModule
@@ -8,16 +10,24 @@ from mounter.workspace import Workspace
 
 class CppGroup:
 	"""
-	This is a group of cpp files associated with a CppProject.
+	This is a group of files associated with a CppProject.
 	The group implementation is supplied by the cpp compiler module.
 	"""
-	def add(self,p: Path, project: bool = False, private: bool = False):
+	def add(self,p: Path, project: bool = False, private: bool = False, extension = ...):
 		"""
 		'project': Also add all subfiles in the directory.
 		'private': Do not allow other projects to #include this directory.
+		'extension': Pretend that the file has the specific extension.
 		"""
 		pass
-	
+
+	def addGoal(self, goalState, private: bool = False):
+		"""
+		Registers a state to be added to all goals that will be generated based on this group.
+		'private': If true, the state is only for executables from this group and not in depenedent groups.
+		"""
+		pass
+
 	def use(self,c: 'CppGroup'):
 		pass
 
@@ -34,7 +44,7 @@ class CppModule(workspace.Module):
 class CppProject(workspace.Module):
 	def __init__(self, projectFile, *dependencies):
 		super().__init__(projectFile)
-		self.path = Path(projectFile).getParent()
+		self._path = Path(projectFile).getParent()
 		self.__dependencies = tuple(dependencies)
 	
 	def activate(self, context: workspace.Workspace):
@@ -42,36 +52,42 @@ class CppProject(workspace.Module):
 		self.__dependencies = tuple(context.add(d) for d in self.__dependencies)
 	
 	def collectSources(self):
-		return self.path.getPreorder()
+		"""All files that are supplied by the project. This is used in a supply gate."""
+		return self._path.getPreorder()
 
-	def fillGroup(self, group: CppGroup):
-		group.add(self.path, project = True)
+	def fillGroup(self, group: CppGroup, context : workspace.Workspace = None):
+		group.add(self._path, project = True)
 	
 	def cppGroup(self):
 		return self._group
 	
-	def run(self, context):
+	def run(self, context : workspace.Workspace):
 		cppmod : CppModule = context[CppModule]
 		opmod : OperationModule = context[OperationModule]
 		sources = self.collectSources()
 		if sources is not None:
 			opmod.add(Gate(produces=sources))
 		self._group = cppmod.newGroup()
-		self.fillGroup(self._group)
+		self.fillGroup(self._group, context)
 		for d in self.__dependencies:
-			self._group.use(d.cppGroup())
+			if isinstance(d,CppProject):
+				self._group.use(d.cppGroup())
 
 class ClangGroup(CppGroup):
 
-	def __init__(self, rootDir: Path, binDir: Path):
+	def __init__(self, uid: int, rootDir: Path, binDir: Path):
+		self.__uid = uid
 		self.rootDir = rootDir
 		self.binDir = binDir
 		self.dependencies: List[ClangGroup] = [] # List of group dependencies.
 		self.units: Dict[Path,bool] = {} # Set of files to compile. Value indicates whether it is a main file.
 		self.includes: Dict[Path,bool] = {} # Include paths. True if dependent groups inherit this.
 		self.libraries: Dict[Path,Path] = {} # Library paths. Value is None for static libraries, otherwise where they need to be moved.
+		self.goals: Dict[object,bool] = {} # Additional goals. Values if True if the goal is to be inherited by dependents.
 
-	def add(self,p: Path, project: bool = False, private: bool = False):
+	def add(self,p: Path, project: bool = False, private: bool = False, extension = ...):
+		if extension == ...:
+			extension = p.getExtension()
 		if p.isDirectory():
 			if project:
 				for l in p.getLeaves():
@@ -80,20 +96,39 @@ class ClangGroup(CppGroup):
 					elif l.hasExtension("hpp"):
 						self.units[l] = False
 			self.includes[p] = not bool(private)
-		elif p.hasExtension("dll"):
+		elif extension == "dll":
 			self.libraries[p] = p.relativeToParent().moveTo(self.binDir)
-		elif p.hasExtension("lib"):
+		elif extension == "lib":
 			self.libraries[p] = None
-		elif p.hasExtension("cpp"):
+		elif extension == "cpp":
 			self.units[p] = True
-		elif p.hasExtension("hpp"):
+		elif extension == "hpp":
 			self.units[p] = False
 	
+	def addGoal(self, state, private: bool = False):
+		"""
+		Registers an additional state into the CppGroup.
+		The state will be added to all goals that will be generated based on this group.
+		"""
+		if state in self.goals:
+			private = not self.goals[state]
+		self.goals[state] = not bool(private)
+	
+	def topoUpdateUse(self,visited : set) -> Iterable['ClangGroup']:
+		if self.__uid in visited:
+			return
+		visited.add(self.__uid)
+		for k in self.dependencies:
+			k.topoUpdateUse(visited)
+		self.updateUse()
+
 	def updateUse(self):
 		for k in self.dependencies:
-			k.updateUse()
 			self.includes.update((i,p) for (i,p) in k.includes.items() if p)
 			self.libraries.update(k.libraries)
+			for (s,p) in k.goals.items():
+				if p:
+					self.goals[s] = True
 	
 	def use(self,c):
 		self.dependencies.append(c)
@@ -113,7 +148,7 @@ class ClangModule(CppModule):
 		self.optimalize = False
 	
 	def newGroup(self):
-		c = ClangGroup(self.root, self.bin)
+		c = ClangGroup(len(self.groups), self.root, self.bin)
 		self.groups.append(c)
 		return c
 	
@@ -136,10 +171,13 @@ class ClangModule(CppModule):
 				useLLVM = True
 			else:
 				useLLVM = False
+		
+		visited = set()
 
 		for group in self.groups:
-
-			group.updateUse()
+			group.topoUpdateUse(visited)
+		
+		for group in self.groups:
 			objects = []
 			mains: List[Path] = []
 			compileArgs = ["-std=c++20","-Wc++17-extensions"]
@@ -220,7 +258,8 @@ class ClangModule(CppModule):
 				req = [mainObject]
 				req.extend(objects)
 				executable = mainObject.relativeToParent().moveTo(self.bin).withExtension("exe")
-				runtime = [executable]
+				runtime = set()
+				runtime.add(executable)
 				cmd = ["clang++",mainObject,"-o",executable] + compileArgs
 				cmd.extend(objects)
 
@@ -230,11 +269,16 @@ class ClangModule(CppModule):
 					req.append(dll)
 					if dyn is not None:
 						dlls[dll] = dyn
-						runtime.append(dyn)
-
+						runtime.add(dyn)
+				
 				yield Gate(requires=req,produces=[executable],internal=Command(*cmd))
+
+				runtime.update(group.goals.keys())
 
 				yield Gate(requires=runtime,goal=True)
 
 		for (dll,dyn) in dlls.items():
 			yield operation.Copy(dll,dyn)
+
+def manifest():
+	return CppModule()
