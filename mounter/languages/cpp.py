@@ -79,6 +79,7 @@ class ClangGroup(CppGroup):
 		self.__uid = uid
 		self.rootDir = rootDir
 		self.binDir = binDir
+		self.objects: Set[Path] = set()
 		self.dependencies: List[ClangGroup] = [] # List of group dependencies.
 		self.units: Dict[Path,bool] = {} # Set of files to compile. Value indicates whether it is a main file.
 		self.includes: Dict[Path,bool] = {} # Include paths. True if dependent groups inherit this.
@@ -114,22 +115,14 @@ class ClangGroup(CppGroup):
 			private = not self.goals[state]
 		self.goals[state] = not bool(private)
 	
-	def topoUpdateUse(self,visited : set) -> Iterable['ClangGroup']:
+	def topo(self,visited : Set[int]):
 		if self.__uid in visited:
 			return
 		visited.add(self.__uid)
 		for k in self.dependencies:
-			k.topoUpdateUse(visited)
-		self.updateUse()
+			yield from k.topo(visited)
+		yield self
 
-	def updateUse(self):
-		for k in self.dependencies:
-			self.includes.update((i,p) for (i,p) in k.includes.items() if p)
-			self.libraries.update(k.libraries)
-			for (s,p) in k.goals.items():
-				if p:
-					self.goals[s] = True
-	
 	def use(self,c):
 		self.dependencies.append(c)
 
@@ -173,12 +166,21 @@ class ClangModule(CppModule):
 				useLLVM = False
 		
 		visited = set()
+		topology : List[ClangGroup] = []
 
 		for group in self.groups:
-			group.topoUpdateUse(visited)
-		
-		for group in self.groups:
-			objects = []
+			for g in group.topo(visited):
+				topology.append(g)
+
+		for group in topology:
+			for k in group.dependencies:
+				group.includes.update((i,p) for (i,p) in k.includes.items() if p)
+				group.libraries.update(k.libraries)
+				for (s,p) in k.goals.items():
+					if p:
+						group.goals[s] = True
+				group.objects.update(k.objects)
+
 			mains: List[Path] = []
 			compileArgs = ["-std=c++20","-Wc++17-extensions"]
 			
@@ -249,19 +251,19 @@ class ClangModule(CppModule):
 				if isMain:
 					mains.append(objectPath)
 				else:
-					objects.append(objectPath)
+					group.objects.add(objectPath)
 
 			# Generate commands to compile each separate main file.
 			# Generate goals for each main file.
 
 			for mainObject in mains:
 				req = [mainObject]
-				req.extend(objects)
+				req.extend(group.objects)
 				executable = mainObject.relativeToParent().moveTo(self.bin).withExtension("exe")
 				runtime = set()
 				runtime.add(executable)
 				cmd = ["clang++",mainObject,"-o",executable] + compileArgs
-				cmd.extend(objects)
+				cmd.extend(group.objects)
 
 				for (dll,dyn) in group.libraries.items():
 					cmd.append("--for-linker")
