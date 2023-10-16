@@ -89,7 +89,7 @@ class ClangGroup(CppGroup):
 	def add(self,p: Path, project: bool = False, private: bool = False, extension = ...):
 		if extension == ...:
 			extension = p.getExtension()
-		if p.isDirectory():
+		if isinstance(p,Path) and p.isDirectory():
 			if project:
 				for l in p.getLeaves():
 					if l.hasExtension("cpp"):
