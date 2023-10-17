@@ -180,8 +180,10 @@ class Module(workspace.Module):
 	
 	def run(self,context):
 		self._checker.load()
-		context.run()
-		self._checker.save()
+		try:
+			context.run()
+		finally:
+			self._checker.save()
 
 manifest = Module
 

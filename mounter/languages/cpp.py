@@ -139,6 +139,7 @@ class ClangModule(CppModule):
 		self.debug = False
 		self.useLLVM = None
 		self.optimalize = False
+		self.additionalArguments: Set[str] = set()
 	
 	def newGroup(self):
 		c = ClangGroup(len(self.groups), self.root, self.bin)
@@ -182,7 +183,7 @@ class ClangModule(CppModule):
 				group.objects.update(k.objects)
 
 			mains: List[Path] = []
-			compileArgs = ["-std=c++20","-Wc++17-extensions"]
+			compileArgs = list(self.additionalArguments)
 			
 			if useLLVM:
 				compileArgs.append("-fuse-ld=lld")
@@ -194,6 +195,17 @@ class ClangModule(CppModule):
 			if(self.optimalize):
 				compileArgs.append("-O3")
 
+			compileArgs.sort()
+
+			k = 0
+			while k < len(compileArgs):
+				o = compileArgs[k]
+				if isinstance(o,tuple):
+					compileArgs = compileArgs[:k] + list(o) + compileArgs[k+1:]
+					k = k + len(o)
+				else:
+					k = k + 1
+			
 			# Generate commands to compile each object file.
 			
 			for (inputPath,isMain) in group.units.items():
