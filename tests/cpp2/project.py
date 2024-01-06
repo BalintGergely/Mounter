@@ -7,3 +7,5 @@ import tests.cpp.project as cpp1
 class manifest(CppProject):
 	def __init__(self):
 		super().__init__(__file__, cpp1)
+		
+		self._main = "main2.cpp"

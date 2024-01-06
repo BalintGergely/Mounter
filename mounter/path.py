@@ -38,8 +38,9 @@ class Path(Hashable):
 	
 	def getExtension(self):
 		n = self.__p.name
-		if "." in n:
-			return n[n.rfind(".")+1:]
+		k = n.rfind(".")
+		if 0 <= k:
+			return n[k+1:]
 		else:
 			return None
 	
@@ -62,12 +63,18 @@ class Path(Hashable):
 		return self.relativeTo(self.getParent())
 	
 	def getParent(self) -> 'Path':
+		"""
+		Parent path if exists. None if it does not.
+		"""
 		pt = self.__p.parent
 		if pt == self.__p:
 			return None
 		return Path(pt)
 	
 	def getName(self) -> str:
+		"""
+		The last path element. The file name including extensions.
+		"""
 		return self.__p.name
 	
 	def subpath(self,child : str) -> 'RelativePath':
@@ -109,9 +116,15 @@ class Path(Hashable):
 		return self.__p.exists()
 
 	def getChildren(self):
+		"""
+		A generator producing the direct children of this Path.
+		"""
 		return (Path(p) for p in self.__p.iterdir())
 	
 	def getParents(self,includeSelf = False):
+		"""
+		A generator producing the Parents of this Path. Root first.
+		"""
 		p = self.getParent()
 		if p is not None:
 			yield from p.getParents(includeSelf=True)
@@ -119,6 +132,9 @@ class Path(Hashable):
 			yield self
 
 	def getLeaves(self):
+		"""
+		A generator producing all non-directory subpaths of this path.
+		"""
 		for f in self.getChildren():
 			if f.isFile():
 				yield f
@@ -126,6 +142,10 @@ class Path(Hashable):
 				yield from f.getLeaves()
 	
 	def getPreorder(self,includeSelf = True):
+		"""
+		A generator producing all subpaths of this path in preorder.
+		All paths are encountered before any of their subpaths.
+		"""
 		if includeSelf:
 			yield self
 		if self.isDirectory():
@@ -133,6 +153,10 @@ class Path(Hashable):
 				yield from f.getPreorder()
 	
 	def getPostorder(self,includeSelf = True):
+		"""
+		A generator producing all subpaths of this path in postorder.
+		All paths are encountered after all their subpaths.
+		"""
 		if self.isDirectory():
 			for f in self.getChildren():
 				yield from f.getPostorder()
@@ -140,6 +164,10 @@ class Path(Hashable):
 			yield self
 	
 	def getBreadthFirst(self,includeSelf = True):
+		"""
+		A generator producing all subpaths of this path in breadth first order.
+		All paths are encountered before any path with more path elements.
+		"""
 		queue : List[Path] = list()
 
 		if includeSelf:

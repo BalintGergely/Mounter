@@ -4,6 +4,7 @@ from itertools import chain, tee
 import asyncio
 import subprocess
 import mounter.workspace as workspace
+import mounter.progress as progress
 from typing import final
 
 class Operation:
@@ -20,14 +21,20 @@ class Operation:
 		'''States this operation requires.'''
 		return ()
 
-	async def runAsync(self):
-		return self.run()
+	def getProgressLength(self):
+		"""
+		Returns the number of times the progress callback will be invoked for this Operation.
+		"""
+		assert False, f"getSubdivisionCount() method has not been overridden for {type(self)}"
+
+	async def runAsync(self, progress):
+		return self.run(progress)
 	
-	def run(self):
-		assert False, "run() method has not been overridden for type"+type(self)
+	def run(self, progress):
+		assert False, f"run() method has not been overridden for {type(self)}"
 		
 	def opHash(self):
-		assert False, "opHash() method has not been overridden for type"+type(self)
+		assert False, f"opHash() method has not been overridden for {type(self)}"
 
 @final
 class Gate(Operation):
@@ -81,6 +88,12 @@ class Gate(Operation):
 	def getResultStates(self) -> Iterable:
 		yield from self.__result
 	
+	def getProgressLength(self):
+		if self.__internal is not None:
+			return self.__internal.getProgressLength()
+		else:
+			return 0
+	
 	def isGoal(self) -> bool:
 		'''Whether running this gate is a goal.'''
 		return self.__goal
@@ -100,13 +113,13 @@ class Gate(Operation):
 	def nonGoal(self) -> 'Gate':
 		return Gate(goal=False,base=self)
 
-	async def runAsync(self):
+	async def runAsync(self, progress):
 		if self.__internal is not None:
-			return await self.__internal.runAsync()
+			return await self.__internal.runAsync(progress)
 	
-	def run(self):
+	def run(self, progress):
 		if self.__internal is not None:
-			return self.__internal.run()
+			return self.__internal.run(progress)
 	
 	def opHash(self):
 		if self.__internal is None:
@@ -148,8 +161,11 @@ class Silence(Operation):
 	
 	def getResultStates(self) -> Iterable[Path]:
 		return self.__internal.getResultStates()
+
+	def getProgressLength(self):
+		return 0
 	
-	def run(self):
+	def run(self, progress):
 		print(str(self))
 	
 	def opHash(self):
@@ -176,8 +192,12 @@ class Copy(Operation):
 	def getResultStates(self):
 		yield self.__target
 	
-	def run(self):
+	def getProgressLength(self):
+		return 1
+
+	def run(self, progress):
 		self.__source.opCopyTo(self.__target)
+		progress()
 	
 	def opHash(self):
 		return f"cat {self.__source} > {self.__target}"
@@ -196,7 +216,10 @@ class CreateDirectories(Operation):
 		self.__directories = tuple(directories)
 		self.__empty = empty
 	
-	def run(self):
+	def getProgressLength(self):
+		return 1
+	
+	def run(self, progress):
 		for d in self.__directories:
 			if d.isDirectory():
 				if self.__empty:
@@ -204,6 +227,7 @@ class CreateDirectories(Operation):
 						file.opDelete()
 			else:
 				d.opCreateDirectories()
+		progress()
 	
 	def getResultStates(self) -> Iterable:
 		return self.__directories
@@ -244,8 +268,11 @@ class Cluster(Operation):
 	
 	def getResultStates(self) -> Iterable[Path]:
 		yield from self.__resultStates.keys()
+	
+	def getProgressLength(self):
+		return sum(o.getProgressLength() for o in self.__operations)
 
-	def __atopo(self,index,ops):
+	def __atopo(self,index,ops,progress):
 		'''
 		Returns the task for the specific operation index.
 		If the task has not been generated yet, generates it.
@@ -259,21 +286,21 @@ class Cluster(Operation):
 		toWait: List[Operation] = []
 		for state in op.getRequiredStates():
 			if state in self.__resultStates:
-				toWait.append(self.__atopo(self.__resultStates[state],ops))
+				toWait.append(self.__atopo(self.__resultStates[state],ops,progress))
 		
 		async def runWhenReady():
 			for t in toWait:
 				await t
-			return await op.runAsync()
+			return await op.runAsync(progress)
 
 		task = asyncio.create_task(runWhenReady())
 		ops[index] = (task,)
 
 		return task
 	
-	async def runAsync(self):
+	async def runAsync(self, progress):
 		ops = list(self.__operations)
-		ts = [self.__atopo(x,ops) for x in range(len(self.__operations))]
+		ts = [self.__atopo(x,ops,progress) for x in range(len(self.__operations))]
 		for t in ts:
 			await t
 	
@@ -289,11 +316,11 @@ class Cluster(Operation):
 					yield from self.__stopo(self.__resultStates[state],ops)
 			yield op
 	
-	def run(self):
+	def run(self,progress):
 		ops = list(self.__operations)
 		for x in range(len(ops)):
 			for t in self.__stopo(x,ops):
-				t.run()
+				t.run(progress)
 	
 	def opHash(self):
 		l = [f"[{h.opHash()}]" for h in self.__operations]
@@ -326,13 +353,16 @@ class Sequence(Operation):
 	def getResultStates(self) -> Iterable[Path]:
 		yield from self.__resultStates
 	
-	async def runAsync(self):
-		for op in self.__operations:
-			await op.runAsync()
+	def getProgressLength(self):
+		return sum(o.getProgressLength() for o in self.__operations)
 	
-	def run(self):
+	async def runAsync(self, progress):
 		for op in self.__operations:
-			op.run()
+			await op.runAsync(progress)
+	
+	def run(self, progress):
+		for op in self.__operations:
+			op.run(progress)
 	
 	def opHash(self):
 		return "\n".join(f"[{h.opHash()}]" for h in self.__operations)
@@ -345,8 +375,11 @@ class Command(Operation):
 	__command: Tuple[str]
 	def __init__(self, *args: str):
 		self.__command = tuple(str(k) for k in args)
+	
+	def getProgressLength(self):
+		return 1
 
-	async def runAsync(self):
+	async def runAsync(self, progress):
 		proc = await asyncio.create_subprocess_shell(subprocess.list2cmdline(self.__command),
 		stdout=asyncio.subprocess.PIPE,
 		stderr=asyncio.subprocess.PIPE)
@@ -358,14 +391,18 @@ class Command(Operation):
 
 		if proc.returncode != 0:
 			raise Exception(subprocess.list2cmdline(self.__command))
+
+		progress()
 	
-	def run(self):
+	def run(self, progress):
 		proc = subprocess.Popen(self.__command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 		stdout, stderr = proc.communicate()
 		print(stdout.decode(), end="")
 		print(stderr.decode(), end="")
 		if proc.returncode != 0:
 			raise Exception(subprocess.list2cmdline(self.__command))
+		
+		progress()
 	
 	def opHash(self):
 		return " ".join(f"\"{k}\"" for k in self.__command)
@@ -375,9 +412,11 @@ class Command(Operation):
 
 class Module(workspace.Module):
 
-	def __init__(self,useAsync = False):
+	def __init__(self,useAsync = False,printProgress = False):
 		super().__init__(key = __file__)
 		self.__useAsync = useAsync
+		self.__printProgress = printProgress
+		self.__performedOps = 0
 	
 	def activate(self, context):
 		if self.__useAsync:
@@ -388,11 +427,21 @@ class Module(workspace.Module):
 	def filterOperations(self, operations: List[Operation], context):
 		return operations
 	
-	def _runOperation(self, context, operation):
+	def _runOperation(self, context, operation : Operation):
+		maxProgress = self.__performedOps + operation.getProgressLength()
+		def adv():
+			self.__performedOps = self.__performedOps + 1
+			if self.__printProgress:
+				progress.progressTick(self.__performedOps,maxProgress)
+		
+		if self.__printProgress:
+			progress.progressInit(maxProgress)
 		if self.__useAsync:
-			context[workspace.Asyncio].wait(operation.runAsync())
+			context[workspace.Asyncio].wait(operation.runAsync(adv))
 		else:
-			operation.run()
+			operation.run(adv)
+		if self.__printProgress:
+			progress.progressEnd()
 	
 	def run(self, context):
 

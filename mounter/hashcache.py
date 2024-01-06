@@ -199,6 +199,9 @@ class LazyOperation(Operation):
 	
 	def getRequiredStates(self):
 		return self.__internal.getRequiredStates()
+	
+	def getProgressLength(self):
+		return self.__internal.getProgressLength()
 
 	def __needsToRun(self):
 		if not all([self.__cache.checkState(f) for f in self.__internal.getRequiredStates()]):
@@ -212,18 +215,26 @@ class LazyOperation(Operation):
 		myHash = self.opHash()
 		for f in self.__internal.getResultStates():
 			self.__cache.setState(f,myHash)
-
-	async def runAsync(self):
-		if self.__needsToRun():
-			result = await self.__internal.runAsync()
-			self.__postRun()
-			return result
 	
-	def run(self):
+	def __lazyProgress(self,progress):
+		for k in range(self.__internal.getProgressLength()):
+			progress()
+
+	async def runAsync(self, progress):
 		if self.__needsToRun():
-			result = self.__internal.run()
+			result = await self.__internal.runAsync(progress)
 			self.__postRun()
 			return result
+		else:
+			self.__lazyProgress(progress)
+	
+	def run(self, progress):
+		if self.__needsToRun():
+			result = self.__internal.run(progress)
+			self.__postRun()
+			return result
+		else:
+			self.__lazyProgress(progress)
 	
 	def opHash(self):
 		return self.__internal.opHash()

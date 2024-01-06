@@ -9,8 +9,8 @@ import mounter.operation.utility as utility
 
 class Selective(operation.Module):
 
-	def __init__(self, useAsync = False, goalStatePred = None, runSet = None, useHashCache = False):
-		super().__init__(useAsync)
+	def __init__(self, useAsync = False, goalStatePred = None, runSet = None, useHashCache = False, printProgress = False):
+		super().__init__(useAsync,printProgress)
 		self.goalStatePred = goalStatePred
 		self.runSet = runSet
 		self.useHashCache = useHashCache

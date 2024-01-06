@@ -8,25 +8,40 @@ import mounter.operation as operation
 from mounter.operation import Gate, Command, Module as OperationModule
 from mounter.workspace import Workspace
 
+CPP_IGNORE = 0
+CPP_SOURCE = 1
+CPP_SOURCE_MAIN = 2
+CPP_STATICALLY_LINKED = 3
+CPP_DYNAMICALLY_LINKED = 4
+
 class CppGroup:
 	"""
 	This is a group of files associated with a CppProject.
 	The group implementation is supplied by the cpp compiler module.
 	"""
-	def add(self,p: Path, project: bool = False, private: bool = False, extension = ...):
+	def addInput(self,p: Path, project: bool = False, private: bool = False, main: bool | str = ..., extension = ...):
 		"""
-		'project': Also add all subfiles in the directory.
+		Add inputs to the group.
+		'project': Also add all subpaths in the directory.
 		'private': Do not allow other projects to #include this directory.
+		'main': Indicates whether files being added are main files.
+		Can also specify a string to pass the name of the main file.
 		'extension': Pretend that the file has the specific extension.
 		"""
-		pass
+		raise Exception("Not implemented")
+
+	def addOutput(self,p: Path,executable: bool = True):
+		"""
+		Add an output to the group.
+		"""
+		raise Exception("Not implemented")
 
 	def addGoal(self, goalState, private: bool = False):
 		"""
 		Registers a state to be added to all goals that will be generated based on this group.
 		'private': If true, the state is only for executables from this group and not in depenedent groups.
 		"""
-		pass
+		raise Exception("Not implemented")
 
 	def use(self,c: 'CppGroup'):
 		pass
@@ -41,11 +56,16 @@ class CppModule(workspace.Module):
 	def newGroup(self) -> CppGroup:
 		raise Exception("Not implemented!")
 
-class CppProject(workspace.Module):
+class SupportsCppGroup():
+	def cppGroup():
+		raise Exception("Not implemented")
+
+class CppProject(workspace.Module,SupportsCppGroup):
 	def __init__(self, projectFile, *dependencies):
 		super().__init__(projectFile)
 		self._path = Path(projectFile).getParent()
 		self.__dependencies = tuple(dependencies)
+		self._main = ...
 	
 	def activate(self, context: workspace.Workspace):
 		context.add(CppModule)
@@ -56,7 +76,7 @@ class CppProject(workspace.Module):
 		return self._path.getPreorder()
 
 	def fillGroup(self, group: CppGroup, context : workspace.Workspace = None):
-		group.add(self._path, project = True)
+		group.addInput(self._path, project = True, main = self._main)
 	
 	def cppGroup(self):
 		return self._group
@@ -70,41 +90,68 @@ class CppProject(workspace.Module):
 		self._group = cppmod.newGroup()
 		self.fillGroup(self._group, context)
 		for d in self.__dependencies:
-			if isinstance(d,CppProject):
+			if isinstance(d,SupportsCppGroup):
 				self._group.use(d.cppGroup())
 
 class ClangGroup(CppGroup):
 
-	def __init__(self, uid: int, rootDir: Path, binDir: Path):
+	def __init__(self, module : 'ClangModule', uid: int, rootDir: Path, binDir: Path):
 		self.__uid = uid
+		self.__clangModule = module
 		self.rootDir = rootDir
 		self.binDir = binDir
-		self.objects: Set[Path] = set()
-		self.dependencies: List[ClangGroup] = [] # List of group dependencies.
-		self.units: Dict[Path,bool] = {} # Set of files to compile. Value indicates whether it is a main file.
-		self.includes: Dict[Path,bool] = {} # Include paths. True if dependent groups inherit this.
-		self.libraries: Dict[Path,Path] = {} # Library paths. Value is None for static libraries, otherwise where they need to be moved.
-		self.goals: Dict[object,bool] = {} # Additional goals. Values if True if the goal is to be inherited by dependents.
+		self.objects: Set[Path] = set()                     # Set of object files.
+		self.dependencies: List[(ClangGroup,bool)] = list() # List of group dependencies.
+		self.units: Set[Path] = set()                       # Set of source files to compile.
+		self.includes: Dict[Path,bool] = dict()             # Include paths.
+		self.staticLibraries: Set[Path] = set()             # Static libraries.
+		self.dynamicLibraries: Dict[Path,Path] = dict()     # Dynamic libraries
+		self.goals: Dict[object,bool] = dict()              # Additional goals. (For use with resource files.)
+		self.outputs: Dict[object,bool] = dict()            # Output files of this group.
+		self.extensions: Dict[str,int] = None
+	
+	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool = ..., extension = ...):		
 
-	def add(self,p: Path, project: bool = False, private: bool = False, extension = ...):
-		if extension == ...:
-			extension = p.getExtension()
-		if isinstance(p,Path) and p.isDirectory():
+		def handleSingleFile(x : Path):
+			ext = extension
+			if ext == ...:
+				ext = x.getExtension()
+			fileKind = None
+			if isinstance(extension,dict):
+				fileKind = extension[ext]
+			else:
+				fileKind = {"cpp": CPP_SOURCE, "lib" : CPP_STATICALLY_LINKED, "dll" : CPP_DYNAMICALLY_LINKED}.get(ext,CPP_IGNORE)
+			if fileKind == CPP_SOURCE or fileKind == CPP_SOURCE_MAIN:
+				isMainFile = False
+				if isinstance(main,bool):
+					isMainFile = main
+				elif isinstance(main,str):
+					isMainFile = main in x.getName()
+				elif fileKind == CPP_SOURCE_MAIN:
+					isMainFile = True
+				if isMainFile:
+					g = self.__clangModule.newGroup()
+					g.dependencies.append((self,True))
+					g.units.add(x)
+					g.addOutput(x.relativeToParent().moveTo(self.binDir).withExtension("exe"))
+				else:
+					self.units.add(x)
+			if fileKind == CPP_DYNAMICALLY_LINKED:
+				self.dynamicLibraries[x] = x.relativeToParent().moveTo(self.binDir)
+			if fileKind == CPP_STATICALLY_LINKED:
+				self.staticLibraries.add(x)
+
+		if p.isDirectory():
 			if project:
 				for l in p.getLeaves():
-					if l.hasExtension("cpp"):
-						self.units[l] = True
-					elif l.hasExtension("hpp"):
-						self.units[l] = False
+					handleSingleFile(l)
 			self.includes[p] = not bool(private)
-		elif extension == "dll":
-			self.libraries[p] = p.relativeToParent().moveTo(self.binDir)
-		elif extension == "lib":
-			self.libraries[p] = None
-		elif extension == "cpp":
-			self.units[p] = True
-		elif extension == "hpp":
-			self.units[p] = False
+		else:
+			handleSingleFile(p)
+
+	
+	def addOutput(self, p: Path, executable: bool = True):
+		self.outputs[p] = executable
 	
 	def addGoal(self, state, private: bool = False):
 		"""
@@ -119,12 +166,15 @@ class ClangGroup(CppGroup):
 		if self.__uid in visited:
 			return
 		visited.add(self.__uid)
-		for k in self.dependencies:
+		for (k,v) in self.dependencies:
 			yield from k.topo(visited)
 		yield self
+	
+	def getUID(self):
+		return self.__uid
 
 	def use(self,c):
-		self.dependencies.append(c)
+		self.dependencies.append((c,False))
 
 class ClangModule(CppModule):
 	def __init__(self, root = Path(""), obj = Path("obj/bin"), src = Path("obj/cpp"), bin = Path("bin")):
@@ -142,7 +192,7 @@ class ClangModule(CppModule):
 		self.additionalArguments: Set[str] = set()
 	
 	def newGroup(self):
-		c = ClangGroup(len(self.groups), self.root, self.bin)
+		c = ClangGroup(self, len(self.groups), self.root, self.bin)
 		self.groups.append(c)
 		return c
 	
@@ -156,7 +206,7 @@ class ClangModule(CppModule):
 			opmod.add(op)
 	
 	def makeOps(self):
-		dlls = {}
+		dynamicLibraries = set()
 
 		useLLVM = self.useLLVM
 
@@ -172,17 +222,17 @@ class ClangModule(CppModule):
 		for group in self.groups:
 			for g in group.topo(visited):
 				topology.append(g)
-
+		
 		for group in topology:
-			for k in group.dependencies:
-				group.includes.update((i,p) for (i,p) in k.includes.items() if p)
-				group.libraries.update(k.libraries)
+			for (k,nested) in group.dependencies:
+				group.includes.update((i,p) for (i,p) in k.includes.items() if (p or nested))
+				group.staticLibraries.update(k.staticLibraries)
+				group.dynamicLibraries.update(k.dynamicLibraries)
 				for (s,p) in k.goals.items():
-					if p:
-						group.goals[s] = True
+					if p or nested:
+						group.goals[s] = group.goals.get(s,False) or p
 				group.objects.update(k.objects)
 
-			mains: List[Path] = []
 			compileArgs = list(self.additionalArguments)
 			
 			if useLLVM:
@@ -208,7 +258,7 @@ class ClangModule(CppModule):
 			
 			# Generate commands to compile each object file.
 			
-			for (inputPath,isMain) in group.units.items():
+			for inputPath in group.units:
 				inputRelative = None
 				preprocessPath = None
 				objectPath = None
@@ -260,39 +310,35 @@ class ClangModule(CppModule):
 				cmd.extend(["-o",objectPath])
 				yield Gate(requires=req,produces=[objectPath],internal=Command(*cmd))
 
-				if isMain:
-					mains.append(objectPath)
-				else:
-					group.objects.add(objectPath)
+				group.objects.add(objectPath)
 
-			# Generate commands to compile each separate main file.
-			# Generate goals for each main file.
+			# Generate commands to compile each separate output file.
+			
+			for (a,b) in group.dynamicLibraries.items():
+				dynamicLibraries.add((a,b))
 
-			for mainObject in mains:
-				req = [mainObject]
-				req.extend(group.objects)
-				executable = mainObject.relativeToParent().moveTo(self.bin).withExtension("exe")
-				runtime = set()
-				runtime.add(executable)
-				cmd = ["clang++",mainObject,"-o",executable] + compileArgs
+			for (binary,isMain) in group.outputs.items():
+				req = list(group.objects)
+				runtime = set(group.dynamicLibraries.values())
+				runtime.add(binary)
+				cmd = ["clang++","-o",binary] + compileArgs
+				if not isMain:
+					cmd.append("-shared")
 				cmd.extend(group.objects)
 
-				for (dll,dyn) in group.libraries.items():
+				for lib in group.staticLibraries:
 					cmd.append("--for-linker")
-					cmd.append(dll)
-					req.append(dll)
-					if dyn is not None:
-						dlls[dll] = dyn
-						runtime.add(dyn)
+					cmd.append(lib)
+					req.append(lib)
 				
-				yield Gate(requires=req,produces=[executable],internal=Command(*cmd))
+				yield Gate(requires=req,produces=[binary],internal=Command(*cmd))
 
 				runtime.update(group.goals.keys())
 
 				yield Gate(requires=runtime,goal=True)
 
-		for (dll,dyn) in dlls.items():
-			yield operation.Copy(dll,dyn)
+		for (a,b) in dynamicLibraries:
+			yield operation.Copy(a,b)
 
 def manifest():
 	return CppModule()

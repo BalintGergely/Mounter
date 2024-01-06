@@ -5,7 +5,6 @@ import mounter.languages.cpp as cpp
 import mounter.languages.java as java
 import mounter.hashcache as hashcache
 import importlib
-from typing import Iterable
 from mounter.workspace import Workspace
 from mounter.path import Path
 
@@ -62,7 +61,8 @@ opm: operation.Module = w.use(operation.Selective(
 	useAsync = not args.noasync,
 	goalStatePred = isWantedGoal,
 	runSet = set(args.whatif) if args.whatif is not None else None,
-	useHashCache = True
+	useHashCache = True,
+	printProgress = True
 ))
 
 cppManifest = w.use(cpp.ClangModule(root=root,obj=obj.subpath("cpp"),bin=bin))

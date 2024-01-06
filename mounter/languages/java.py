@@ -6,7 +6,7 @@ import struct
 import shutil
 import zipfile
 from mounter.operation import Operation, Command, CreateDirectories, Module as OperationModule, Sequence
-from mounter.languages.cpp import CppModule, CppProject, CppGroup
+from mounter.languages.cpp import CppModule, CppProject, CppGroup, SupportsCppGroup
 from mounter.operation import Gate, Command
 from mounter.workspace import Workspace
 
@@ -78,11 +78,11 @@ class JavaProject(workspace.Module):
 class Module(workspace.Module):
 	def __init__(self, root = Path(""), obj = Path("obj/java"), include = Path("obj/java/CppInclude"),bin = Path("bin")):
 		super().__init__(key = __file__)
-		self.groups: List[JavaGroup] = []
-		self.root = root
-		self.obj = obj
-		self.bin = bin
-		self.include = include
+		self._groups: List[JavaGroup] = []
+		self._root = root
+		self._obj = obj
+		self._bin = bin
+		self._include = include
 		self.debug = False
 		self.reflect = True
 	
@@ -92,6 +92,9 @@ class Module(workspace.Module):
 	
 	def newGroup(self):
 		return self.__theGroup
+
+	def getInclude(self):
+		return self._include
 
 	def run(self, context):
 		context.run()
@@ -112,8 +115,8 @@ class Module(workspace.Module):
 		if self.reflect:
 			commandBase.append("-parameters")
 
-		generatedSourcePath = self.obj.subpath("src")
-		generatedClassPath = self.obj.subpath("bin")
+		generatedSourcePath = self._obj.subpath("src")
+		generatedClassPath = self._obj.subpath("bin")
 
 		commandBase.extend(["-d",generatedClassPath])
 
@@ -135,7 +138,7 @@ class Module(workspace.Module):
 
 		opSequence = list()
 
-		opSequence.append(CreateDirectories(generatedClassPath,generatedSourcePath,self.include,empty = True))
+		opSequence.append(CreateDirectories(generatedClassPath,generatedSourcePath,self._include,empty = True))
 
 		if twoPass:
 			firstPass = list(commandBase)
@@ -143,7 +146,7 @@ class Module(workspace.Module):
 
 			firstPass.append("-proc:none")
 			
-			secondPass.extend(["-h",self.include])
+			secondPass.extend(["-h",self._include])
 			secondPass.extend(["-s",generatedSourcePath])
 
 			firstPassPaths = set()
@@ -162,7 +165,7 @@ class Module(workspace.Module):
 		else:
 			secondPass = list(commandBase)
 			secondPass.append("-proc:none")
-			secondPass.extend(["-h",self.include])
+			secondPass.extend(["-h",self._include])
 			secondPass.extend(sorted(group.sourceFiles))
 			opSequence.append(Command(*secondPass))
 
@@ -172,7 +175,10 @@ class Module(workspace.Module):
 
 		yield Gate(requires=(generatedClassPath,),goal=True)
 
-class Native(workspace.Module):
+class CppNativeBinding(workspace.Module,SupportsCppGroup):
+	"""
+	Adding this as a dependency 
+	"""
 	def __init__(self, key):
 		super().__init__(key = (__file__,"nativecpp"))
 	
@@ -189,8 +195,8 @@ class Native(workspace.Module):
 		javainclude = javaexe.getParent().getParent().subpath("include")
 
 		self._group = cppmod.newGroup()
-		self._group.add(javamod.include)
-		self._group.add(javainclude)
+		self._group.addInput(javamod.getInclude())
+		self._group.addInput(javainclude)
 
 		opmod.add(Gate(produces=[javainclude]))
 	
