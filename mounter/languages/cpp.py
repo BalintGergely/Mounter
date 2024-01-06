@@ -118,9 +118,12 @@ class ClangGroup(CppGroup):
 				ext = x.getExtension()
 			fileKind = None
 			if isinstance(extension,dict):
-				fileKind = extension[ext]
+				fileKind = extension[ext.lower()]
 			else:
-				fileKind = {"cpp": CPP_SOURCE, "lib" : CPP_STATICALLY_LINKED, "dll" : CPP_DYNAMICALLY_LINKED}.get(ext,CPP_IGNORE)
+				fileKind = {
+					"cpp": CPP_SOURCE,
+					"lib" : CPP_STATICALLY_LINKED,
+					"dll" : CPP_DYNAMICALLY_LINKED}.get(ext.lower(),CPP_IGNORE)
 			if fileKind == CPP_SOURCE or fileKind == CPP_SOURCE_MAIN:
 				isMainFile = False
 				if isinstance(main,bool):
@@ -136,18 +139,25 @@ class ClangGroup(CppGroup):
 					g.addOutput(x.relativeToParent().moveTo(self.binDir).withExtension("exe"))
 				else:
 					self.units.add(x)
+				return True
 			if fileKind == CPP_DYNAMICALLY_LINKED:
 				self.dynamicLibraries[x] = x.relativeToParent().moveTo(self.binDir)
+				return True
 			if fileKind == CPP_STATICALLY_LINKED:
 				self.staticLibraries.add(x)
-
+				return True
+			return False
+	
 		if p.isDirectory():
 			if project:
+				anyAdded = False
 				for l in p.getLeaves():
-					handleSingleFile(l)
+					added = handleSingleFile(l)
+					anyAdded = added or anyAdded
+				assert anyAdded, "Specified a project directory, but no files were added."
 			self.includes[p] = not bool(private)
 		else:
-			handleSingleFile(p)
+			assert handleSingleFile(p), "File type is not recognisable."
 
 	
 	def addOutput(self, p: Path, executable: bool = True):
