@@ -30,8 +30,9 @@ class Path(Hashable):
 	def __str__(self):
 		return self.__p.as_posix()
 	
-	def hasExtension(self,ext):
-		return self.getExtension() == ext
+	def hasExtension(self,*ext):
+		e = self.getExtension()
+		return any(x == e for x in ext)
 	
 	def resolve(self,subpath):
 		return Path(self.__p.joinpath(subpath))
