@@ -186,6 +186,23 @@ class ClangGroup(CppGroup):
 	def use(self,c):
 		self.dependencies.append((c,False))
 
+def sortKey(o):
+	if isinstance(o,tuple):
+		return tuple(str(v) for v in o)
+	else:
+		return (o,)
+
+def makeCommand(procName: str,cmd: list):
+	cmd = list(cmd)
+	cmd.sort(key = sortKey)
+	res = [procName]
+	for o in cmd:
+		if isinstance(o,tuple):
+			res.extend(o)
+		else:
+			res.append(o)
+	return Command(*res)
+
 class ClangModule(CppModule):
 	def __init__(self, root = Path(""), obj = Path("obj/bin"), src = Path("obj/cpp"), bin = Path("bin")):
 		super().__init__()
@@ -255,17 +272,6 @@ class ClangModule(CppModule):
 			if(self.optimalize):
 				compileArgs.append("-O3")
 
-			compileArgs.sort()
-
-			k = 0
-			while k < len(compileArgs):
-				o = compileArgs[k]
-				if isinstance(o,tuple):
-					compileArgs = compileArgs[:k] + list(o) + compileArgs[k+1:]
-					k = k + len(o)
-				else:
-					k = k + 1
-			
 			# Generate commands to compile each object file.
 			
 			for inputPath in group.units:
@@ -295,19 +301,19 @@ class ClangModule(CppModule):
 
 				objectPath = inputRelative.moveTo(self.obj).withExtension(extension)
 				
-				cmd = ["clang++",inputPath] + compileArgs
+				cmd = [inputPath] + compileArgs
 				req = set(group.includes)
 				req.add(inputPath)
 				for i in group.includes:
-					cmd.append("--include-directory")
-					cmd.append(i)
+					cmd.append(("--include-directory",i))
 					req.add(i)
 
 				if self.preprocess:
-					cmd.extend(["--preprocess","-o",preprocessPath])
-					yield Gate(requires=req,produces=[preprocessPath],internal=Command(*cmd))
+					cmd.append("--preprocess")
+					cmd.append(("-o",preprocessPath))
+					yield Gate(requires=req,produces=[preprocessPath],internal=makeCommand("clang++",cmd))
 					req = [preprocessPath]
-					cmd = ["clang++",preprocessPath] + compileArgs
+					cmd = [preprocessPath] + compileArgs
 				
 				if self.assemble:
 					cmd.append("--assemble")
@@ -317,8 +323,8 @@ class ClangModule(CppModule):
 				if useLLVM:
 					cmd.append("-emit-llvm")
 				
-				cmd.extend(["-o",objectPath])
-				yield Gate(requires=req,produces=[objectPath],internal=Command(*cmd))
+				cmd.append(("-o",objectPath))
+				yield Gate(requires=req,produces=[objectPath],internal=makeCommand("clang++",cmd))
 
 				group.objects.add(objectPath)
 
@@ -331,17 +337,16 @@ class ClangModule(CppModule):
 				req = list(group.objects)
 				runtime = set(group.dynamicLibraries.values())
 				runtime.add(binary)
-				cmd = ["clang++","-o",binary] + compileArgs
+				cmd = [("-o",binary)] + compileArgs
 				if not isMain:
 					cmd.append("-shared")
 				cmd.extend(group.objects)
 
 				for lib in group.staticLibraries:
-					cmd.append("--for-linker")
-					cmd.append(lib)
+					cmd.append(("--for-linker",lib))
 					req.append(lib)
 				
-				yield Gate(requires=req,produces=[binary],internal=Command(*cmd))
+				yield Gate(requires=req,produces=[binary],internal=makeCommand("clang++",cmd))
 
 				runtime.update(group.goals.keys())
 
