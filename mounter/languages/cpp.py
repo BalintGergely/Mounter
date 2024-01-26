@@ -108,7 +108,11 @@ class ClangGroup(CppGroup):
 		self.dynamicLibraries: Dict[Path,Path] = dict()     # Dynamic libraries
 		self.goals: Dict[object,bool] = dict()              # Additional goals. (For use with resource files.)
 		self.outputs: Dict[object,bool] = dict()            # Output files of this group.
+		self.arguments: Dict[str,bool] = dict()             # Set of additional command line arguments for compiling
 		self.extensions: Dict[str,int] = None
+	
+	def disableWarning(self,warning):
+		self.arguments[f"-Wno-{warning}"] = False
 	
 	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool = ..., extension = ...):		
 
@@ -258,6 +262,9 @@ class ClangModule(CppModule):
 				for (s,p) in k.goals.items():
 					if p or nested:
 						group.goals[s] = group.goals.get(s,False) or p
+				for (s,p) in k.arguments.items():
+					if p or nested:
+						group.arguments[s] = group.arguments.get(s,False) or p
 				group.objects.update(k.objects)
 
 			compileArgs = list(self.additionalArguments)
@@ -301,7 +308,7 @@ class ClangModule(CppModule):
 
 				objectPath = inputRelative.moveTo(self.obj).withExtension(extension)
 				
-				cmd = [inputPath] + compileArgs
+				cmd = [inputPath] + compileArgs + list(group.arguments)
 				req = set(group.includes)
 				req.add(inputPath)
 				for i in group.includes:
@@ -313,7 +320,7 @@ class ClangModule(CppModule):
 					cmd.append(("-o",preprocessPath))
 					yield Gate(requires=req,produces=[preprocessPath],internal=makeCommand("clang++",cmd))
 					req = [preprocessPath]
-					cmd = [preprocessPath] + compileArgs
+					cmd = [preprocessPath] + compileArgs + list(group.arguments)
 				
 				if self.assemble:
 					cmd.append("--assemble")
