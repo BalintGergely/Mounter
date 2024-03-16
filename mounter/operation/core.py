@@ -49,8 +49,8 @@ class Gate(Operation):
 	__goal: bool
 	__name: str
 	def __init__(self,
-	    	internal: Operation = None,
-	    	requires: Iterable = ...,
+			internal: Operation = None,
+			requires: Iterable = ...,
 			produces: Iterable = ...,
 			goal = ...,
 			name = ...,

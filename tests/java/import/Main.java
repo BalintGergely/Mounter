@@ -1,17 +1,14 @@
 import java.util.Scanner;
 
-import nat.GCDNative;
-import res.Fruits;
+import pak.Library;
 
-public class Main{
+public class Main {
 	public static void main(String[] atgs){
 		try(Scanner sc = new Scanner(System.in)){
 			int a = sc.nextInt();
 			int b = sc.nextInt();
-			int c = GCDNative.gcd(a, b);
+			int c = Library.gcd(a,b);
 			System.out.println(c);
-
-			Fruits.printAllFruits();
 		}
 	}
 }

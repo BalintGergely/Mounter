@@ -1,13 +1,11 @@
-package res;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Scanner;
 
-public class Fruits {
+public class Main {
 	public static final List<String> FRUIT_LIST;
 	static {
-		try(Scanner sc = new Scanner(Fruits.class.getResourceAsStream("FruitList.txt"))){
+		try(Scanner sc = new Scanner(Main.class.getResourceAsStream("FruitList.txt"))){
 			ArrayList<String> f = new ArrayList<>();
 			String s;
 			while((s = sc.nextLine()) != null){
@@ -21,4 +19,7 @@ public class Fruits {
 			System.out.println(f);
 		}
 	}
+	public static void main(String[] atgs){
+		printAllFruits();
+	}	
 }

@@ -102,7 +102,7 @@ class Git(workspace.Module):
 
 class Fetch:
 	def __init__(self,
-	    	remoteUrl : str = ...,
+			remoteUrl : str = ...,
 			remoteName : str = ...,
 			saveRemote : bool = ...,
 			remoteReference : str = ...,

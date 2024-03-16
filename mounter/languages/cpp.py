@@ -114,20 +114,31 @@ class ClangGroup(CppGroup):
 	def disableWarning(self,warning):
 		self.arguments[f"-Wno-{warning}"] = False
 	
-	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool = ..., extension = ...):		
+	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool = ..., extension = ...):
+		"""
+		- p : The path to add.
+		- project : If path is a directory, add all subpaths
+		- private : Whether or not to export the includes to non-nested groups
+		- extension :
+		- - If str : Pretend that the file(s) have the specified extension.
+		- - If dict : Mapping of file extension string to one of
+			CPP_IGNORE, CPP_SOURCE, CPP_SOURCE_MAIN, CPP_STATICALLY_LINKED, CPP_DYNAMICALLY_LINKED
+		"""
 
 		def handleSingleFile(x : Path):
 			ext = extension
 			if ext == ...:
 				ext = x.getExtension()
+			
 			fileKind = None
 			if isinstance(extension,dict):
-				fileKind = extension[ext.lower()]
+				fileKind = extension.get(ext.lower(),CPP_IGNORE)
 			else:
 				fileKind = {
 					"cpp": CPP_SOURCE,
 					"lib" : CPP_STATICALLY_LINKED,
 					"dll" : CPP_DYNAMICALLY_LINKED}.get(ext.lower(),CPP_IGNORE)
+			
 			if fileKind == CPP_SOURCE or fileKind == CPP_SOURCE_MAIN:
 				isMainFile = False
 				if isinstance(main,bool):
@@ -144,12 +155,15 @@ class ClangGroup(CppGroup):
 				else:
 					self.units.add(x)
 				return True
+
 			if fileKind == CPP_DYNAMICALLY_LINKED:
 				self.dynamicLibraries[x] = x.relativeToParent().moveTo(self.binDir)
 				return True
+			
 			if fileKind == CPP_STATICALLY_LINKED:
 				self.staticLibraries.add(x)
 				return True
+			
 			return False
 	
 		if p.isDirectory():
