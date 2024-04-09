@@ -30,6 +30,9 @@ class Path(Hashable):
 	def __str__(self):
 		return self.__p.as_posix()
 	
+	def __repr__(self):
+		return f"Path(\'{str(self)}\')"
+	
 	def hasExtension(self,*ext):
 		e = self.getExtension()
 		return any(x == e for x in ext)
