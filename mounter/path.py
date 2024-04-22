@@ -66,14 +66,23 @@ class Path(Hashable):
 	def relativeToParent(self) -> 'RelativePath':
 		return self.relativeTo(self.getParent())
 	
+	def relativeToAncestor(self,steps : int = 1) -> 'RelativePath':
+		return self.relativeTo(self.getAncestor(steps))
+
+	def getAncestor(self,steps : int = 1) -> 'Path':
+		"""
+		Ancestor path the given number of layers up, if it exists. None if it does not.
+		"""
+		at = self.__p
+		for _ in range(steps):
+			pt = at.parent
+			if pt == at:
+				return None
+			at = pt
+		return Path(at)
+	
 	def getParent(self) -> 'Path':
-		"""
-		Parent path if exists. None if it does not.
-		"""
-		pt = self.__p.parent
-		if pt == self.__p:
-			return None
-		return Path(pt)
+		return self.getAncestor(1)
 	
 	def getName(self) -> str:
 		"""

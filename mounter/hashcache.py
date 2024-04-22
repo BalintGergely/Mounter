@@ -40,10 +40,12 @@ class HashCache:
 		assert self.__table is not None, "Hash cache was never loaded!"
 		savedTable = {}
 		for k,v in chain(self.__table.items(),self.__witness.items()):
-			if k in savedTable:
-				savedTable[k].update(v)
-			else:
-				savedTable[k] = dict(v)
+			if v.get("final",False):
+				if k in savedTable:
+					savedTable[k].update(v)
+				else:
+					savedTable[k] = dict(v)
+				savedTable[k].pop("final")
 		self.__tableFile.opCreateFile()
 		with self.__tableFile.open("w",encoding="utf-8") as output:
 			json.dump(
@@ -64,6 +66,9 @@ class HashCache:
 			return None
 	
 	def processOpHash(self,opHash):
+		'''
+		Turn the opHash into a unique string representation.
+		'''
 		if isinstance(opHash,str):
 			checker = hashlib.sha1()
 			checker.update(opHash.encode())
@@ -71,65 +76,73 @@ class HashCache:
 		else:
 			return None
 	
-	def computeStateHash(self,key):
+	def _computeStateHash(self,key,renew,final):
 		'''
 		Compute the witness hash for the specific key.
-		This method performs the bulk of the computation, and does not store any result.
 		'''
 		if isinstance(key,Path):
-			total = 0
 			# Hash for directory is full hash including subpath names and children hashes.
 			if key.isDirectory():
 				wils : List[Path] = list(key.getChildren())
 				wils.sort()
 				checker = hashlib.sha1()
+				checker.update(b"\0")
 				for wil in wils:
 					if wil.getName() == "__pycache__":
 						continue # Ignore pycache.
 					checker.update(str(wil).encode())
 					checker.update(b"\0")
-					checker.update(self.computeStateHash(wil).encode())
+					checker.update(self._updateState(wil, renew = renew, final = final).encode())
 					checker.update(b"\0")
 				return str(checker.hexdigest())
 			# Hash for file is the hash of the content.
 			if key.isFile():
 				checker = hashlib.sha1()
+				checker.update(b"\1")
 				with key.open("r") as input:
 					while True:
 						data = input.read(65536)
 						if not data:
 							break
-						total += len(data)
 						checker.update(data)
 				return str(checker.hexdigest())
 		return None
-	
-	def getStateHash(self,key):
-		'''
-		If the state hash for the specified key has not been computed since the last load,
-		computes the state hash and stores it for later invocations.
-		The state hash is returned.
-		'''
+
+	def _updateState(self,key,renew : bool,final : bool,opHash : str = ...):
 		assert self.__witness is not None, "Hash cache already written!"
 		sk = self.toKeyStr(key)
 		if sk is None:
 			return None
+
 		if sk not in self.__witness:
 			self.__witness[sk] = dict()
-		if "stateHash" not in self.__witness[sk]:
-			self.__witness[sk]["stateHash"] = self.computeStateHash(key)
-		return self.__witness[sk]["stateHash"]
-	
-	def checkState(self,key,opHash: str = ...) -> bool:
-		'''
-		If opHash is given, this first checks if opHash matches the stored opHash.
-			If this check fails, False is returned immediately.
 		
-		Then, checks if the state hash for the given key has changed since the last save.
-		The state hash is computed using getStateHash().
+		doRenew = renew or (not self.__witness[sk].get("final",False) and final)
 
-		If the test succeeds, True is returned. False otherwise.
-		'''
+		if doRenew or "stateHash" not in self.__witness[sk]:
+			self.__witness[sk]["stateHash"] = self._computeStateHash(key, renew = renew, final = final)
+			self.__witness[sk]["final"] = final
+		if opHash is not ...:
+			self.__witness[sk]["opHash"] = self.processOpHash(opHash)
+		return self.__witness[sk]["stateHash"]
+		
+	def finalizeOutputState(self,key,opHash: str = ...):
+		self._updateState(key,renew = True, final = True, opHash = opHash)
+	
+	def checkInputState(self,key):
+		sk = self.toKeyStr(key)
+		if sk is None:
+			return False
+			
+		witnessHash = self._updateState(key, renew = False, final = True)
+
+		return (
+			sk in self.__table and
+	  		"stateHash" in self.__table[sk] and
+			witnessHash == self.__table[sk]["stateHash"]
+		)
+
+	def checkOutputState(self,key,opHash):
 		sk = self.toKeyStr(key)
 		if sk is None:
 			return False
@@ -143,27 +156,13 @@ class HashCache:
 			if self.__table[sk]["opHash"] != opHash:
 				return False
 		
-		witnessHash = self.getStateHash(key)
+		witnessHash = self._updateState(key, renew = False, final = False)
 		
 		return (
 			sk in self.__table and
 	  		"stateHash" in self.__table[sk] and
 			witnessHash == self.__table[sk]["stateHash"]
 		)
-
-	def setState(self,key,opHash: str = ...):
-		'''
-		Recomputes the state hash, discarding previous results related to the state.
-		If opHash is given, it is assigned to the state.
-		'''
-		sk = self.toKeyStr(key)
-		if sk is None:
-			return
-		if sk not in self.__witness:
-			self.__witness[sk] = dict()
-		if opHash is not ...:
-			self.__witness[sk]["opHash"] = self.processOpHash(opHash)
-		self.__witness[sk]["stateHash"] = self.computeStateHash(key)
 	
 	def manifest(self):
 		return Module(self)
@@ -204,20 +203,20 @@ class LazyOperation(Operation):
 		return self.__internal.getProgressLength()
 
 	def __needsToRun(self):
-		if not all([self.__cache.checkState(f) for f in self.__internal.getRequiredStates()]):
+		if not all([self.__cache.checkInputState(f) for f in self.__internal.getRequiredStates()]):
 			return True
 		myHash = self.opHash()
-		if not all(self.__cache.checkState(f,myHash) for f in self.__internal.getResultStates()):
+		if not all(self.__cache.checkOutputState(f,myHash) for f in self.__internal.getResultStates()):
 			return True
 		return False
 
 	def __postRun(self):
 		myHash = self.opHash()
 		for f in self.__internal.getResultStates():
-			self.__cache.setState(f,myHash)
+			self.__cache.finalizeOutputState(f,myHash)
 	
 	def __lazyProgress(self,progress):
-		for k in range(self.__internal.getProgressLength()):
+		for _ in range(self.__internal.getProgressLength()):
 			progress()
 
 	async def runAsync(self, progress):

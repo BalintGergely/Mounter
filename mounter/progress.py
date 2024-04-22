@@ -1,3 +1,5 @@
+import shutil
+import time
 
 def progressTick(value,max):
 	if(max == 0):
@@ -5,7 +7,10 @@ def progressTick(value,max):
 	else:
 		assert 0 <= value and value <= max
 		maxs = str(max)
-		dmax = 80 - 5 - len(maxs)*2
+
+		(termWidth,_) = shutil.get_terminal_size()
+
+		dmax = min(termWidth,80) - 5 - len(maxs)*2
 		dmax = min(dmax,max)
 		dval = (value * dmax) // max
 		print(" [{}{}]".format("=" * (dval)," " * (dmax - dval)),end="")
@@ -16,3 +21,11 @@ def progressInit(max):
 
 def progressEnd():
 	print("",end="\n")
+
+if __name__ == "__main__":
+	max = 100
+	progressInit(max)
+	for i in range(max):
+		time.sleep(0.5)
+		progressTick(i + 1,max)
+	progressEnd()

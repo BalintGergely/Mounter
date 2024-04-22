@@ -7,9 +7,8 @@ public class Main {
 	static {
 		try(Scanner sc = new Scanner(Main.class.getResourceAsStream("FruitList.txt"))){
 			ArrayList<String> f = new ArrayList<>();
-			String s;
-			while((s = sc.nextLine()) != null){
-				f.add(s);
+			while(sc.hasNextLine()){
+				f.add(sc.nextLine());
 			}
 			FRUIT_LIST = List.copyOf(f);
 		}
