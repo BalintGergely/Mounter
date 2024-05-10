@@ -29,3 +29,16 @@ if __name__ == "__main__":
 		time.sleep(0.5)
 		progressTick(i + 1,max)
 	progressEnd()
+
+class progress():
+	def __init__(self,max) -> None:
+		progressInit(max)
+		self.__max = max
+		self.__value = 0
+	
+	def __call__(self):
+		self.__value += 1
+		progressTick(self.__value,self.__max)
+
+	def end(self):
+		progressEnd()

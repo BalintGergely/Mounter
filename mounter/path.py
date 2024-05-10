@@ -1,5 +1,6 @@
 import pathlib
 import shutil
+import re
 from io import TextIOWrapper
 from typing import Hashable, Final, Generator, List
 
@@ -9,6 +10,12 @@ class Path(Hashable):
 	This always uses forward slash '/' for separators.
 	'''
 	__p: Final[pathlib.Path]
+	def __new__(cls,arg,*args,**kwargs):
+		if cls is Path and type(arg) is Path:
+			return arg
+		else:
+			return object.__new__(cls)
+	
 	def __init__(self,path):
 		if isinstance(path,Path):
 			self.__p = path.__p
@@ -19,7 +26,7 @@ class Path(Hashable):
 		return self.__p.__hash__()
 	
 	def __eq__(self,other):
-		return isinstance(other,Path) and self.__p == other.__p
+		return type(self) == type(other) and self.__p == other.__p
 	
 	def __lt__(self,other):
 		return str(self) < str(other)

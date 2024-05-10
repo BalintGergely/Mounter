@@ -416,7 +416,6 @@ class Module(workspace.Module):
 		super().__init__(key = __file__)
 		self.__useAsync = useAsync
 		self.__printProgress = printProgress
-		self.__performedOps = 0
 	
 	def activate(self, context):
 		if self.__useAsync:
@@ -428,20 +427,17 @@ class Module(workspace.Module):
 		return operations
 	
 	def _runOperation(self, context, operation : Operation):
-		maxProgress = self.__performedOps + operation.getProgressLength()
-		def adv():
-			self.__performedOps = self.__performedOps + 1
-			if self.__printProgress:
-				progress.progressTick(self.__performedOps,maxProgress)
+		maxProgress = operation.getProgressLength()
+		progressCallback = lambda _: None
+		if self.__printProgress:
+			progressCallback = progress.progress(operation.getProgressLength())
 		
-		if self.__printProgress:
-			progress.progressInit(maxProgress)
 		if self.__useAsync:
-			context[workspace.Asyncio].wait(operation.runAsync(adv))
+			context[workspace.Asyncio].wait(operation.runAsync(progressCallback))
 		else:
-			operation.run(adv)
+			operation.run(progressCallback)
 		if self.__printProgress:
-			progress.progressEnd()
+			progressCallback.end()
 	
 	def run(self, context):
 

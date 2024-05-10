@@ -114,7 +114,7 @@ class ClangGroup(CppGroup):
 	def disableWarning(self,warning):
 		self.arguments[f"-Wno-{warning}"] = False
 	
-	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool = ..., extension = ...):
+	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool | set = ..., extension = ...):
 		"""
 		- p : The path to add.
 		- project : If path is a directory, add all subpaths
@@ -145,6 +145,8 @@ class ClangGroup(CppGroup):
 					isMainFile = main
 				elif isinstance(main,str):
 					isMainFile = main in x.getName()
+				elif isinstance(main,set):
+					isMainFile = x.getName() in main
 				elif fileKind == CPP_SOURCE_MAIN:
 					isMainFile = True
 				if isMainFile:

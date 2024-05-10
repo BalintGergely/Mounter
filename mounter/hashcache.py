@@ -60,7 +60,7 @@ class HashCache:
 		'''
 		if isinstance(key,Path):
 			checker = hashlib.sha1()
-			checker.update(str(key).encode())
+			checker.update(repr(key).encode())
 			return str(checker.hexdigest())
 		else:
 			return None
@@ -81,22 +81,32 @@ class HashCache:
 		Compute the witness hash for the specific key.
 		'''
 		if isinstance(key,Path):
-			# Hash for directory is full hash including subpath names and children hashes.
+			
 			if key.isDirectory():
+				# Hash for directory is full hash including subpath names and children hashes.
+				# The hash of a directory with no files is "emptydir".
 				wils : List[Path] = list(key.getChildren())
 				wils.sort()
+				anyFileFound = False
 				checker = hashlib.sha1()
 				checker.update(b"\0")
 				for wil in wils:
 					if wil.getName() == "__pycache__":
 						continue # Ignore pycache.
-					checker.update(str(wil).encode())
+					childHash = self._updateState(wil, renew = renew, final = final)
+					if childHash == "emptydir":
+						continue
+					checker.update(repr(wil).encode())
 					checker.update(b"\0")
-					checker.update(self._updateState(wil, renew = renew, final = final).encode())
+					checker.update(childHash.encode())
 					checker.update(b"\0")
+					anyFileFound = True
+				if not anyFileFound:
+					return "emptydir"
 				return str(checker.hexdigest())
-			# Hash for file is the hash of the content.
+
 			if key.isFile():
+				# Hash for file is the hash of the content... even for empty files!
 				checker = hashlib.sha1()
 				checker.update(b"\1")
 				with key.open("r") as input:
@@ -106,6 +116,8 @@ class HashCache:
 							break
 						checker.update(data)
 				return str(checker.hexdigest())
+			
+			return "missing"
 		return None
 
 	def _updateState(self,key,renew : bool,final : bool,opHash : str = ...):
