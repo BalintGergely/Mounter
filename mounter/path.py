@@ -25,8 +25,11 @@ class Path(Hashable):
 	def __hash__(self):
 		return self.__p.__hash__()
 	
+	def _eqdc(self):
+		return Path
+	
 	def __eq__(self,other):
-		return type(self) == type(other) and self.__p == other.__p
+		return isinstance(other,Path) and self._eqdc() == other._eqdc() and self.__p == other.__p
 	
 	def __lt__(self,other):
 		return str(self) < str(other)

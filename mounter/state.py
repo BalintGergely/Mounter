@@ -13,6 +13,9 @@ class FilteredPath(Path):
 	def __hash__(self):
 		return super().__hash__() ^ self.__f.__hash__()
 	
+	def _eqdc(self):
+		return FilteredPath
+	
 	def __eq__(self,other):
 		return super().__eq__(other) and self.__f == other.__f
 
