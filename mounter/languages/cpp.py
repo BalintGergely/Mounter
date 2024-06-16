@@ -130,14 +130,17 @@ class ClangGroup(CppGroup):
 			if ext == ...:
 				ext = x.getExtension()
 			
+			if ext is not None:
+				ext = ext.lower()
+			
 			fileKind = None
 			if isinstance(extension,dict):
-				fileKind = extension.get(ext.lower(),CPP_IGNORE)
+				fileKind = extension.get(ext,CPP_IGNORE)
 			else:
 				fileKind = {
 					"cpp": CPP_SOURCE,
 					"lib" : CPP_STATICALLY_LINKED,
-					"dll" : CPP_DYNAMICALLY_LINKED}.get(ext.lower(),CPP_IGNORE)
+					"dll" : CPP_DYNAMICALLY_LINKED}.get(ext,CPP_IGNORE)
 			
 			if fileKind == CPP_SOURCE or fileKind == CPP_SOURCE_MAIN:
 				isMainFile = False
