@@ -2,7 +2,7 @@
 import site
 from mounter.path import Path
 
-mounterPath = Path(__file__).getParent().subpath("mounter")
+mounterPath = Path(__file__).getAncestor().subpath("mounter")
 targetPath = Path(site.getusersitepackages()).subpath("mounter")
 
 print("This will copy the contents of the 'mounter' directory to the following location:")
@@ -17,7 +17,7 @@ if response.lower() != 'y':
 	print("Operation canceled.")
 	exit()
 
-for t in targetPath.getParents(includeSelf=True):
+for t in targetPath.getAncestors(includeSelf=True):
 	if not t.isDirectory():
 		t.opCreateDirectory()
 		print(f"[created {t}]")

@@ -1,20 +1,17 @@
 
-import mounter.operation as op
-from mounter.workspace import Workspace
-from mounter.languages.cpp import CppProject, CppGroup, ClangModule
+from mounter.operation import Asyncio
+from mounter.operation.files import FileManagement
+from mounter.languages.cpp import CppGroup, CppProject
 
 class manifest(CppProject):
-	def __init__(self):
-		super().__init__(__file__)
-		self._main = "main.cpp"
+	def __init__(self, context):
+		super().__init__(context, __file__)
+		self.mains.add("main.cpp")
 	
-	def fillGroup(self, group: CppGroup, context : Workspace):
-		opmod : op.Module = context[op]
-		clang : ClangModule = context[ClangModule]
-		for p in self.collectSources():
-			if p.hasExtension("txt"):
-				t = p.relativeTo(self._path).moveTo(clang.bin)
-				opmod.add(op.Copy(p,t))
-				group.addGoal(t)
-
-		return super().fillGroup(group, context)
+	async def onCompile(self, mainGroup: CppGroup):
+		self.ws[Asyncio].completeLater(
+			self.ws[FileManagement].copyFileTo(
+				self._dir.subpath("resource.txt"),
+				await mainGroup.getBinDirectory()
+			)
+		)

@@ -1,385 +1,478 @@
 
-from mounter.path import Path, RelativePath
-from typing import List, Dict, Set, Tuple, Iterable
-from shutil import which
-import itertools
-import mounter.workspace as workspace
-import mounter.operation as operation
-from mounter.operation import Gate, Command, Module as OperationModule
-from mounter.workspace import Workspace
+from subprocess import list2cmdline
+from typing import Set, List, FrozenSet, override, AsyncIterable, Awaitable
+from mounter.operation.files import *
+from mounter.path import *
+from mounter.workspace import *
+from mounter.delta import *
+from mounter.persistence import *
+from mounter.progress import *
+from mounter.goal import *
+from mounter.operation import *
 
-CPP_IGNORE = 0
-CPP_SOURCE = 1
-CPP_SOURCE_MAIN = 2
-CPP_STATICALLY_LINKED = 3
-CPP_DYNAMICALLY_LINKED = 4
+class CppGroup():
+	async def getIncludes(self) -> FrozenSet[Path]:
+		return frozenset()
+	
+	async def getObjects(self) -> FrozenSet[Path]:
+		return frozenset()
+	
+	async def getStaticLibraries(self) -> FrozenSet[Path]:
+		return frozenset()
+	
+	async def getDynamicLibraries(self) -> FrozenSet[Path]:
+		return frozenset()
+	
+	async def getBinDirectory(self) -> Path:
+		raise Exception("Not supported")
 
-class CppGroup:
-	"""
-	This is a group of files associated with a CppProject.
-	The group implementation is supplied by the cpp compiler module.
-	"""
-	def addInput(self,p: Path, project: bool = False, private: bool = False, main: bool | str = ..., extension = ...):
+	def onCompile(self, mainGroup : 'CppGroup'):
 		"""
-		Add inputs to the group.
-		'project': Also add all subpaths in the directory.
-		'private': Do not allow other projects to #include this directory.
-		'main': Indicates whether files being added are main files.
-		Can also specify a string to pass the name of the main file.
-		'extension': Pretend that the file has the specific extension.
+		Called simultaneously as the specified group is being compiled.
+		Useful to perform indirectly related tasks.
 		"""
-		raise Exception("Not implemented")
-
-	def addOutput(self,p: Path,executable: bool = True):
-		"""
-		Add an output to the group.
-		"""
-		raise Exception("Not implemented")
-
-	def addGoal(self, goalState, private: bool = False):
-		"""
-		Registers a state to be added to all goals that will be generated based on this group.
-		'private': If true, the state is only for executables from this group and not in depenedent groups.
-		"""
-		raise Exception("Not implemented")
-
-	def use(self,c: 'CppGroup'):
-		pass
-
-class CppModule(workspace.Module):
-	def __init__(self):
-		super().__init__(key = __file__)
+		return instant()
 	
-	def activate(self, context: Workspace):
-		raise Exception("This is an abstract module. You need to register the implementation to use it!")
-
-	def newGroup(self) -> CppGroup:
-		raise Exception("Not implemented!")
-
-class SupportsCppGroup():
-	def cppGroup():
-		raise Exception("Not implemented")
-
-class CppProject(workspace.Module,SupportsCppGroup):
-	def __init__(self, projectFile, *dependencies):
-		super().__init__(projectFile)
-		self._path = Path(projectFile).getParent()
-		self.__dependencies = tuple(dependencies)
-		self._main = ...
+	def compile() -> Awaitable:
+		raise Exception("Not a compilable CppGroup!")
 	
-	def activate(self, context: workspace.Workspace):
-		context.add(CppModule)
-		self.__dependencies = tuple(context.add(d) for d in self.__dependencies)
+	@final
+	def __eq__(self, that):
+		return self is that
 	
-	def collectSources(self):
-		"""All files that are supplied by the project. This is used in a supply gate."""
-		return self._path.getPreorder()
+	@final
+	def __hash__(self):
+		return id(self)
 
-	def fillGroup(self, group: CppGroup, context : workspace.Workspace = None):
-		group.addInput(self._path, project = True, main = self._main)
-	
-	def cppGroup(self):
-		return self._group
-	
-	def run(self, context : workspace.Workspace):
-		cppmod : CppModule = context[CppModule]
-		opmod : OperationModule = context[OperationModule]
-		sources = self.collectSources()
-		if sources is not None:
-			opmod.add(Gate(produces=sources))
-		self._group = cppmod.newGroup()
-		self.fillGroup(self._group, context)
-		for d in self.__dependencies:
-			if isinstance(d,SupportsCppGroup):
-				self._group.use(d.cppGroup())
-
-class ClangGroup(CppGroup):
-
-	def __init__(self, module : 'ClangModule', uid: int, rootDir: Path, binDir: Path):
-		self.__uid = uid
-		self.__clangModule = module
-		self.rootDir = rootDir
-		self.binDir = binDir
-		self.objects: Set[Path] = set()                     # Set of object files.
-		self.dependencies: List[(ClangGroup,bool)] = list() # List of group dependencies.
-		self.units: Set[Path] = set()                       # Set of source files to compile.
-		self.includes: Dict[Path,bool] = dict()             # Include paths.
-		self.staticLibraries: Set[Path] = set()             # Static libraries.
-		self.dynamicLibraries: Dict[Path,Path] = dict()     # Dynamic libraries
-		self.goals: Dict[object,bool] = dict()              # Additional goals. (For use with resource files.)
-		self.outputs: Dict[object,bool] = dict()            # Output files of this group.
-		self.arguments: Dict[str,bool] = dict()             # Set of additional command line arguments for compiling
-		self.extensions: Dict[str,int] = None
-	
-	def disableWarning(self,warning):
-		self.arguments[f"-Wno-{warning}"] = False
-	
-	def addInput(self,p: Path, project: bool = False, private: bool = False, main: str | bool | set = ..., extension = ...):
-		"""
-		- p : The path to add.
-		- project : If path is a directory, add all subpaths
-		- private : Whether or not to export the includes to non-nested groups
-		- extension :
-		- - If str : Pretend that the file(s) have the specified extension.
-		- - If dict : Mapping of file extension string to one of
-			CPP_IGNORE, CPP_SOURCE, CPP_SOURCE_MAIN, CPP_STATICALLY_LINKED, CPP_DYNAMICALLY_LINKED
-		"""
-
-		def handleSingleFile(x : Path):
-			ext = extension
-			if ext == ...:
-				ext = x.getExtension()
-			
-			if ext is not None:
-				ext = ext.lower()
-			
-			fileKind = None
-			if isinstance(extension,dict):
-				fileKind = extension.get(ext,CPP_IGNORE)
-			else:
-				fileKind = {
-					"cpp": CPP_SOURCE,
-					"lib" : CPP_STATICALLY_LINKED,
-					"dll" : CPP_DYNAMICALLY_LINKED}.get(ext,CPP_IGNORE)
-			
-			if fileKind == CPP_SOURCE or fileKind == CPP_SOURCE_MAIN:
-				isMainFile = False
-				if isinstance(main,bool):
-					isMainFile = main
-				elif isinstance(main,str):
-					isMainFile = main in x.getName()
-				elif isinstance(main,set):
-					isMainFile = x.getName() in main
-				elif fileKind == CPP_SOURCE_MAIN:
-					isMainFile = True
-				if isMainFile:
-					g = self.__clangModule.newGroup()
-					g.dependencies.append((self,True))
-					g.units.add(x)
-					g.addOutput(x.relativeToParent().moveTo(self.binDir).withExtension("exe"))
-				else:
-					self.units.add(x)
-				return True
-
-			if fileKind == CPP_DYNAMICALLY_LINKED:
-				self.dynamicLibraries[x] = x.relativeToParent().moveTo(self.binDir)
-				return True
-			
-			if fileKind == CPP_STATICALLY_LINKED:
-				self.staticLibraries.add(x)
-				return True
-			
-			return False
-	
-		if p.isDirectory():
-			if project:
-				anyAdded = False
-				for l in p.getLeaves():
-					added = handleSingleFile(l)
-					anyAdded = added or anyAdded
-				assert anyAdded, "Specified a project directory, but no files were added."
-			self.includes[p] = not bool(private)
-		else:
-			assert handleSingleFile(p), "File type is not recognisable."
-
-	
-	def addOutput(self, p: Path, executable: bool = True):
-		self.outputs[p] = executable
-	
-	def addGoal(self, state, private: bool = False):
-		"""
-		Registers an additional state into the CppGroup.
-		The state will be added to all goals that will be generated based on this group.
-		"""
-		if state in self.goals:
-			private = not self.goals[state]
-		self.goals[state] = not bool(private)
-	
-	def topo(self,visited : Set[int]):
-		if self.__uid in visited:
-			return
-		visited.add(self.__uid)
-		for (k,v) in self.dependencies:
-			yield from k.topo(visited)
-		yield self
-	
-	def getUID(self):
-		return self.__uid
-
-	def use(self,c):
-		self.dependencies.append((c,False))
-
-def sortKey(o):
-	if isinstance(o,tuple):
-		return tuple(str(v) for v in o)
-	else:
-		return (o,)
-
-def makeCommand(procName: str,cmd: list):
-	cmd = list(cmd)
-	cmd.sort(key = sortKey)
-	res = [procName]
-	for o in cmd:
-		if isinstance(o,tuple):
-			res.extend(o)
-		else:
-			res.append(o)
-	return Command(*res)
-
-class ClangModule(CppModule):
-	def __init__(self, root = Path(""), obj = Path("obj/bin"), src = Path("obj/cpp"), bin = Path("bin")):
+class InputCppGroup(CppGroup):
+	def __init__(self) -> None:
 		super().__init__()
-		self.groups: List[ClangGroup] = []
-		self.root = root
-		self.obj = obj
-		self.bin = bin
-		self.src = src
-		self.preprocess = True
-		self.assemble = False
-		self.debug = False
-		self.useLLVM = None
-		self.optimalize = False
-		self.additionalArguments: Set[str] = set()
+		self.includes = set()
+		self.objects = set()
+		self.staticLibraries = set()
+		self.dynamicLibraries = set()
+		self.compileEventListeners = []
+		self.onLinkCallback = None
 	
-	def newGroup(self):
-		c = ClangGroup(self, len(self.groups), self.root, self.bin)
-		self.groups.append(c)
-		return c
+	@override
+	@once
+	def getIncludes(self):
+		return instant(frozenset(self.includes))
 	
-	def activate(self, context):
-		context.add(operation)
-
-	def run(self, context):
-		context.run()
-		opmod = context[operation]
-		for op in self.makeOps():
-			opmod.add(op)
+	@override
+	@once
+	def getObjects(self):
+		return instant(frozenset(self.objects))
 	
-	def makeOps(self):
-		dynamicLibraries = set()
+	@override
+	@once
+	def getStaticLibraries(self):
+		return instant(frozenset(self.staticLibraries))
+	
+	@override
+	@once
+	def getDynamicLibraries(self):
+		return instant(frozenset(self.dynamicLibraries))
+	
+	@override
+	@once
+	def onCompile(self, mainGroup : 'CppGroup'):
+		return gather(*[c(mainGroup) for c in self.compileEventListeners])
 
-		useLLVM = self.useLLVM
+class AggregatorCppGroup(CppGroup):
+	def __init__(self, dependencies : Dict[CppGroup,bool] = ()) -> None:
+		super().__init__()
+		self._dependencies : Dict[CppGroup,bool] = dict(dependencies)
 
-		if useLLVM is None:
-			if which("lld") != None:
-				useLLVM = True
+	@op
+	async def __lookupIncludes(self,allowPrivate) -> FrozenSet['Path']:
+		tasks = [g.getIncludes() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
+		return frozenset([i for t in tasks for i in await t])
+
+	@op
+	async def __lookupObjects(self,allowPrivate) -> FrozenSet['Path']:
+		tasks = [g.getObjects() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
+		return frozenset([o for t in tasks for o in await t])
+	
+	@op
+	async def __lookupStaticLibraries(self,allowPrivate) -> FrozenSet['Path']:
+		tasks = [g.getStaticLibraries() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
+		return frozenset([l for t in tasks for l in await t])
+	
+	@op
+	async def __lookupDynamicLibraries(self,allowPrivate) -> FrozenSet['Path']:
+		tasks = [g.getDynamicLibraries() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
+		return frozenset([l for t in tasks for l in await t])
+	
+	def getIncludes(self): return self.__lookupIncludes(False)
+	def getObjects(self): return self.__lookupObjects(True)
+	def getStaticLibraries(self): return self.__lookupStaticLibraries(False)
+	def getDynamicLibraries(self): return self.__lookupDynamicLibraries(False)
+	def _getMyIncludes(self): return self.__lookupIncludes(True)
+	def _getMyStaticLibraries(self): return self.__lookupStaticLibraries(True)
+	def _getMyDynamicLibraries(self): return self.__lookupDynamicLibraries(True)
+
+	@once
+	def onCompile(self, mainGroup: CppGroup):
+		return gather(*[g.onCompile(mainGroup) for g in self._dependencies.keys()])
+
+class ClangCppGroup(AggregatorCppGroup):
+	def __init__(self,
+			clangGroup : 'ClangModule',
+			dependencies : Dict[CppGroup,bool] = (),
+			srcDirectory : Path = ...,
+			binDirectory : Path = ...,
+			objDirectory : Path = ...,
+			rootDirectory : Path = ...,
+			assemble : bool = False,
+			debug : bool = False,
+			useLLVM : bool = True,
+			optimalize : bool = False,
+			sources : AsyncIterable[Path] = None,
+			outputName : str = None
+			) -> None:
+		super().__init__(dependencies)
+		self.cpp = clangGroup
+		self.ws = clangGroup.ws
+		self.__rootDirectory = rootDirectory
+		self.__objDirectory = objDirectory
+		self.__binDirectory = binDirectory
+		self.__srcDirectory = srcDirectory
+		self.__assemble = assemble
+		self.__debug = debug
+		self.__useLLVM = useLLVM
+		self.__sources = sources
+		self.__optimalize = optimalize
+		self.__outputName = outputName
+	
+	@op
+	async def getBinDirectory(self) -> Path:
+		self.__binDirectory.opCreateDirectories()
+		return self.__binDirectory
+
+	@op
+	async def __preprocess(self, sourceFile : Path) -> Path:
+		"""
+		Preprocess the specified source file.
+		Returns after the operation is done, with the Path of the preprocessed file.
+		"""
+		with self.ws[Progress].register() as pu:
+			outputFile = sourceFile \
+				.relativeTo(self.__rootDirectory) \
+				.moveTo(self.__srcDirectory) \
+				.withExtension("cpp")
+			includes = await self._getMyIncludes()
+			deltaChecker = self.ws[FileDeltaChecker]
+
+			dependencyHash = []
+			dependencyHash.append(deltaChecker.query(sourceFile))
+
+			for i in sorted(includes):
+				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**")))
+			
+			cmd = ["clang++",sourceFile,"-CC","--preprocess","-o",outputFile]
+			cmd.append("-finput-charset=UTF-8")
+			for i in includes:
+				cmd.extend(["--include-directory",i])
+			
+			cmd = [str(c) for c in cmd]
+
+			pu.setName(list2cmdline(cmd))
+			pu.setRunning()
+
+			data = self.ws[FileManagement].lock(outputFile, self)
+			if data.get("dependencyHash",None) != dependencyHash \
+			or not data.get("stable",None) \
+			or not outputFile.isPresent():
+				data.clear()				
+				outputFile.getAncestor().opCreateDirectories()
+				(ret, a , b) = await self.ws[Asyncio].runCommand(cmd)
+
+				data["stable"] = bool(ret == 0 and a == b'' and b == b'')
+				data["dependencyHash"] = dependencyHash
+
+				assert ret == 0
 			else:
-				useLLVM = False
-		
-		visited = set()
-		topology : List[ClangGroup] = []
-
-		for group in self.groups:
-			for g in group.topo(visited):
-				topology.append(g)
-		
-		for group in topology:
-			for (k,nested) in group.dependencies:
-				group.includes.update((i,p) for (i,p) in k.includes.items() if (p or nested))
-				group.staticLibraries.update(k.staticLibraries)
-				group.dynamicLibraries.update(k.dynamicLibraries)
-				for (s,p) in k.goals.items():
-					if p or nested:
-						group.goals[s] = group.goals.get(s,False) or p
-				for (s,p) in k.arguments.items():
-					if p or nested:
-						group.arguments[s] = group.arguments.get(s,False) or p
-				group.objects.update(k.objects)
-
-			compileArgs = list(self.additionalArguments)
-			
-			if useLLVM:
-				compileArgs.append("-fuse-ld=lld")
-
-			if(self.debug):
-				compileArgs.append("-g")
-				compileArgs.append("-O0")
-			
-			if(self.optimalize):
-				compileArgs.append("-O3")
-
-			# Generate commands to compile each object file.
-			
-			for inputPath in group.units:
-				inputRelative = None
-				preprocessPath = None
-				objectPath = None
-
-				if self.root.isSubpath(inputPath):
-					inputRelative = inputPath.relativeTo(self.root)
+				pu.setUpToDate()
+			return outputFile
+	
+	@op
+	async def __compile(self, sourceFile) -> Path:
+		"""
+		Compiles the specified source file. (This includes preprocessing)
+		Returns after the operation is done, with the Path of the object file.
+		"""
+		with self.ws[Progress].register() as pu:
+			preFile = await self.__preprocess(sourceFile)
+			extension = None
+			deltaChecker = self.ws[FileDeltaChecker]
+			if self.__assemble:
+				if self.__useLLVM:
+					extension = "ll"
 				else:
-					inputRelative = inputPath.relativeToParent()
-				
-				preprocessPath = inputRelative.moveTo(self.src).withExtension("cpp")
-
-				extension = None
-
-				if self.assemble:
-					if useLLVM:
-						extension = "ll"
-					else:
-						extension = "asm"
+					extension = "s"
+			else:
+				if self.__useLLVM:
+					extension = "bc"
 				else:
-					if useLLVM:
-						extension = "bc"
-					else:
-						extension = "o"
-
-				objectPath = inputRelative.moveTo(self.obj).withExtension(extension)
-				
-				cmd = [inputPath] + compileArgs + list(group.arguments)
-				req = set(group.includes)
-				req.add(inputPath)
-				for i in group.includes:
-					cmd.append(("--include-directory",i))
-					req.add(i)
-
-				if self.preprocess:
-					cmd.append("--preprocess")
-					cmd.append(("-o",preprocessPath))
-					yield Gate(requires=req,produces=[preprocessPath],internal=makeCommand("clang++",cmd))
-					req = [preprocessPath]
-					cmd = [preprocessPath] + compileArgs + list(group.arguments)
-				
-				if self.assemble:
-					cmd.append("--assemble")
-				else:
-					cmd.append("--compile")
-				
-				if useLLVM:
-					cmd.append("-emit-llvm")
-				
-				cmd.append(("-o",objectPath))
-				yield Gate(requires=req,produces=[objectPath],internal=makeCommand("clang++",cmd))
-
-				group.objects.add(objectPath)
-
-			# Generate commands to compile each separate output file.
+					extension = "o"
 			
-			for (a,b) in group.dynamicLibraries.items():
-				dynamicLibraries.add((a,b))
+			outputFile = preFile.relativeTo(self.__srcDirectory) \
+				.moveTo(self.__objDirectory) \
+				.withExtension(extension)
 
-			for (binary,isMain) in group.outputs.items():
-				req = list(group.objects)
-				runtime = set(group.dynamicLibraries.values())
-				runtime.add(binary)
-				cmd = [("-o",binary)] + compileArgs
-				if not isMain:
-					cmd.append("-shared")
-				cmd.extend(group.objects)
+			dependencyHash = []
+			dependencyHash.append(deltaChecker.query(preFile))
 
-				for lib in group.staticLibraries:
-					cmd.append(("--for-linker",lib))
-					req.append(lib)
+			cmd = ["clang++",preFile,"-o",outputFile]
+			cmd.append("-finput-charset=UTF-8")
+			if self.__assemble:
+				cmd.append("--assemble")
+			else:
+				cmd.append("--compile")
+			if self.__useLLVM:
+				cmd.append("-emit-llvm")
+			if self.__debug:
+				cmd.append("--debug")
+				cmd.append("-O0")
+			if self.__optimalize:
+				cmd.append("-O3")
+				if self.__useLLVM:
+					cmd.append("-flto")
+			
+			cmd = [str(c) for c in cmd]
+
+			pu.setName(list2cmdline(cmd))
+			pu.setRunning()
+			data = self.ws[FileManagement].lock(outputFile, self)
+
+			if self.__debug and not data.get("debug",None) \
+			or self.__optimalize and not data.get("optimalize",None) \
+			or not data.get("stable",None) \
+			or data.get("dependencyHash",None) != dependencyHash \
+			or not outputFile.isPresent():
+				data.clear()
+				outputFile.getAncestor().opCreateDirectories()
+				(ret, a, b) = await self.ws[Asyncio].runCommand(cmd)
+
+				if self.__debug:
+					data["debug"] = True
+				if self.__optimalize:
+					data["optimalize"] = True
+				data["stable"] = bool(ret == 0 and a == b'' and b == b'')
+				data["dependencyHash"] = dependencyHash
+
+				assert ret == 0
+			else:
+				pu.setUpToDate()
+			return outputFile
+	
+	@override
+	@op
+	async def getObjects(self) -> FrozenSet[Path]:
+		inherited = super().getObjects()
+		if self.__sources is None:
+			return await inherited
+		if isinstance(self.__sources,AsyncIterable):
+			tasks = [self.__compile(p) async for p in self.__sources]
+		else:
+			tasks = [self.__compile(p) for p in self.__sources]
+		return (await inherited).union([await t for t in tasks])
+
+	@op
+	async def link(self) -> Path:
+		"""
+		Links the specific output file in this group.
+		Returns it's path.
+		"""
+		with self.ws[Progress].register() as pu:
+			deltaChecker = self.ws[FileDeltaChecker]
+
+			(binDirectory,staticLibraries,allObjects) = await gather(
+				self.getBinDirectory(),
+				self._getMyStaticLibraries(),
+				self.getObjects()
+			)
+			outputFile = binDirectory.subpath(self.__outputName)
+			isMain = outputFile.hasExtension("exe")
+			dependencyHash = []
+			for o in sorted(allObjects):
+				dependencyHash.append(deltaChecker.query(o))
+			dependencyHash.append(None)
+			for l in sorted(staticLibraries):
+				dependencyHash.append(deltaChecker.query(l))
 				
-				yield Gate(requires=req,produces=[binary],internal=makeCommand("clang++",cmd))
+			cmd = ["clang++","-o",outputFile] + list(allObjects)
+			cmd.append("-finput-charset=UTF-8")
+			if self.__debug:
+				cmd.append("--debug")
+			if self.__optimalize:
+				cmd.append("-O3")
+				if self.__useLLVM:
+					cmd.append("-flto")
+			if self.__useLLVM:
+				cmd.append("-fuse-ld=lld")
+			if not isMain:
+				cmd.append("-shared")
+			for lib in staticLibraries:
+				cmd.append("--for-linker")
+				cmd.append(lib)
+			
+			cmd = [str(c) for c in cmd]
 
-				runtime.update(group.goals.keys())
+			pu.setName(list2cmdline(cmd))
+			pu.setRunning()
+			data = self.ws[FileManagement].lock(outputFile, self)
+			
+			if self.__debug and not data.get("debug",None) \
+			or self.__optimalize and not data.get("optimalize",None) \
+			or not data.get("stable",None) \
+			or data.get("dependencyHash",None) != dependencyHash \
+			or not outputFile.isPresent():
+				
+				outputFile.getAncestor().opCreateDirectories()
+				(ret, a, b) = await self.ws[Asyncio].runCommand(cmd)
 
-				yield Gate(requires=runtime,goal=True)
+				if self.__debug:
+					data["debug"] = True
+				if self.__optimalize:
+					data["optimalize"] = True
+				data["stable"] = bool(ret == 0 and a == b'' and b == b'')
+				data["dependencyHash"] = dependencyHash
 
-		for (a,b) in dynamicLibraries:
-			yield operation.Copy(a,b)
+				assert ret == 0
+			else:
+				pu.setUpToDate()
+			
+			return outputFile
+	
+	@op
+	async def copyDlls(self):
+		(dllSet,binDirectory) = await gather(self._getMyDynamicLibraries(),self.getBinDirectory())
+		tasks = [self.ws[FileManagement].copyFile(l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet]
+		await gather(*tasks)
+	
+	@once
+	def compile(self):
+		return gather(self.link(),self.copyDlls(),self.onCompile(self))
+
+class CppModule(Module):
+	def __init__(self, context) -> None:
+		super().__init__(context)
+		self.ws.add(FileManagement)
+		self.ws.add(FileDeltaChecker)
+		self.ws.add(Progress)
+		self.ws.add(Asyncio)
+		self.rootDirectory = Path(".")
+		self.objDirectory = self.rootDirectory.subpath("obj/cpp")
+		self.binDirectory = self.rootDirectory.subpath("bin")
+		self.srcDirectory = self.objDirectory
+
+	@op
+	async def copyDll(self, sourcePath : Path, targetPath : Path):
+		with self.ws[Progress].register() as pu:
+			pu.setName(f"Copy {sourcePath} to {targetPath}")
+			deltaChecker = self.ws[FileDeltaChecker]
+			data = self.getFileProperties(targetPath)
+			if deltaChecker.query(sourcePath) != data.get("sourceHash") \
+			or not targetPath.isPresent():
+				pu.setRunning()
+				sourcePath.opCopyTo(targetPath)
+			else:
+				pu.setUpToDate()
+	
+	def makeGroup(self,*,
+			dependencies : Dict[CppGroup,bool] = ...,
+			sources = ...,
+			outputName = ...,
+			**kwargs) -> AggregatorCppGroup:
+		raise Exception("Not implemented")
 
 def manifest():
-	return CppModule()
+	return CppModule
+
+class ClangModule(CppModule):
+	key = CppModule.key
+	def __init__(self, context) -> None:
+		super().__init__(context)
+		self.assemble = False
+		self.debug = False
+		self.optimalize = False
+	
+	def makeGroup(self,**kwargs):
+		def setDefault(key,value):
+			nonlocal kwargs
+			if key not in kwargs:
+				kwargs[key] = value
+		setDefault("rootDirectory",self.rootDirectory)
+		setDefault("objDirectory",self.objDirectory)
+		setDefault("binDirectory",self.binDirectory)
+		setDefault("srcDirectory",self.srcDirectory)
+		setDefault("assemble",self.assemble)
+		setDefault("debug",self.debug)
+		setDefault("optimalize",self.optimalize)
+		return ClangCppGroup(self,**kwargs)
+
+class SupportsCppGroup():
+	async def getCppGroup() -> CppGroup:
+		raise Exception("Not implemented")
+
+class CppProject(Module,SupportsCppGroup):
+	def __init__(self, context, projectFile = None, *dependencies) -> None:
+		super().__init__(context)
+		self.ws.add(GoalTracker)
+		self.ws.add(CppModule)
+		self._dependencies = tuple(self.ws.add(d) for d in dependencies)
+		if projectFile is not None:
+			self._dir = Path(projectFile).getAncestor()
+		else:
+			self._dir = None
+		self.group = InputCppGroup()
+		self.group.compileEventListeners.append(self.onCompile)
+		self.privateGroup = InputCppGroup()
+		self.compilationUnits : Set[Path] = set()
+		self.mains : Set[Path | str] = set()
+		self.__mainPaths : Set[Path] = set()
+	
+	def fillGroup(self):
+		if self._dir is not None:
+			self.group.includes.add(self._dir)
+			for p in self._dir.getPreorder():
+				if p not in self.__mainPaths and p.hasExtension("cpp","c"):
+					self.compilationUnits.add(p)
+	
+	async def onCompile(self,mainGroup : CppGroup):
+		pass
+	
+	@op
+	async def getCppGroup(self):
+		dependencies = {
+			self.group : True,
+			self.privateGroup : False
+		}
+		tasks : List[Awaitable[CppGroup]] = []
+		for d in self._dependencies:
+			if isinstance(d,SupportsCppGroup):
+				tasks.append(d.getCppGroup())
+		for t in tasks:
+			dependencies[await t] = True
+		return self.ws[CppModule].makeGroup(dependencies = dependencies, sources = self.compilationUnits)
+	
+	@op
+	async def _compileExecutable(self,mainFile : Path,name : str):
+		mainGroup = self.ws[CppModule].makeGroup(
+			dependencies = [(await self.getCppGroup(),True)],
+			sources = [mainFile],
+			outputName = name)
+		await mainGroup.compile()
+
+	def run(self):
+		for p in self.mains:
+			if isinstance(p,str):
+				p = self._dir.subpath(p)
+			self.__mainPaths.add(p)
+		self.fillGroup()
+		for p in self.__mainPaths:
+			name = p.withExtension("exe").getName()
+			if self.ws[GoalTracker].defineThenQuery(name):
+				self.ws[Asyncio].completeLater(self._compileExecutable(p,name))

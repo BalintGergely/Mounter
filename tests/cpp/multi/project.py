@@ -2,6 +2,6 @@
 from mounter.languages.cpp import CppProject
 
 class manifest(CppProject):
-	def __init__(self):
-		super().__init__(__file__)
-		self._main = "main.cpp"
+	def __init__(self, context):
+		super().__init__(context, __file__)
+		self.mains.add("main.cpp")

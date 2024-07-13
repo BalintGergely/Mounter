@@ -1,70 +1,47 @@
-from mounter.path import Path
-from typing import Final, Set, Dict, List, final, TypeVar, Tuple
-import asyncio
 
-class Module:
-	__key: Final
-	def __init__(self,key):
-		'''key is typically some unique identification of the Module.'''
-		self.__key = key
+from typing import Any, Dict, List, final, Final, TypeVar, Type
 
-	@final
-	def key(self):
-		return self.__key
-	
-	def activate(self,context: 'Workspace'):
-		'''
-		Activate is called during module discovery. It signals that this object
-		will be representing the module identified by it's key.
-		This method should register all dependent modules.
-		'''
+class ModuleInitContext():
+	def __init__(self, workspace : 'Workspace') -> None:
+		self._workspace = workspace
+
+class Module():
+	key : Any
+
+	def __new__(cls, contextArg = ...) -> None:
+		if contextArg is ...:
+			return cls
+		else:
+			return super().__new__(cls)
+
+	def __init__(self, context : ModuleInitContext) -> None:
+		self.ws : Final[Workspace] = context._workspace
+
+	def __init_subclass__(cls) -> None:
+		if "key" not in cls.__dict__:
+			setattr(cls,"key",cls)
 		pass
 
-	def run(self,context: 'Workspace'):
-		'''
+	def _downstream(self):
+		"""
+		Call this to run downstream modules.
+		"""
+		self.ws.run()
+
+	def run(self):
+		"""
 		In the execution phase, run() is invoked for all modules in dependency order.
 		That is, all dependencies have been ran before this is invoked.
-		If the module needs to do cleanup after dependents have run, use context.run(),
-		clean up afterwards.
-		'''
+		"""
 		pass
 
-	def __str__(self) -> str:
-		return f"Module(type = {type(self)},key = {self.__key})"
-
-	@classmethod
 	@final
-	def manifest(cls) -> 'Module':
-		return cls()
-
-class Asyncio(Module):
-	'''
-	Module that sets up an asyncio event loop.
-	Use the wait function in this module to wait for a task.
-	'''
-	def __init__(self):
-		super().__init__(key = (__file__,"asyncio"))
-	
-	def run(self,context):
-		self.__loop = asyncio.new_event_loop()
-		try:
-			asyncio.set_event_loop(self.__loop)
-			context.run()
-		finally:
-			try:
-				self.__loop.run_until_complete(self.__loop.shutdown_asyncgens())
-				self.__loop.run_until_complete(self.__loop.shutdown_default_executor())
-			finally:
-				asyncio.set_event_loop(None)
-				self.__loop.close()
-
-	def wait(self,task):
-		return self.__loop.run_until_complete(task)
-
-T = TypeVar("T", bound=Module)
+	@classmethod
+	def manifest(cls):
+		return cls
 
 class AppendHook():
-	def __init__(self,fnc,mod) -> None:
+	def __init__(self,fnc,mod : Module) -> None:
 		self.run = fnc
 		self.parent = mod
 
@@ -86,20 +63,30 @@ class Workspace:
 	In Execution phase, run() is invoked for all modules in the order they
 	appear in the list. Modules may also opt to do a cleanup action after all their dependents have run.
 	'''
+	T = TypeVar("T",bound = Module)
 
 	def __init__(self):
-		self.__activeModules : Dict[Tuple,Module] = {}
-		self.__inactiveModules : Dict[Tuple,Module] = {}
+		self.__activeModules : Dict[object,Module] = {}
+		self.__inactiveModules : Dict[object,type] = {}
 		self.__topology : List[Module] = []
 		self.__topologyIndex : int = 0
 		self.__runningModule = None
 		pass
 	
-	def __getitem__(self,mod: T) -> T:
+	def __getitem__(self,mod : Type[T]) -> T:
 		'''Fetch a specific module.'''
-		realMod = self.__activeModules[mod.manifest().key()]
+		mod = mod.manifest()
+		realMod = self.__activeModules[mod.key]
 		assert realMod is not None
 		return realMod
+	
+	def __contains__(self,mod : Type[T]) -> bool:
+		mod = mod.manifest()
+		if mod.key in self.__activeModules:
+			modInstance = self.__activeModules[mod.key]
+			if isinstance(modInstance,mod):
+				return True
+		return False
 
 	def getCurrentExecutingModule(self):
 		'''Returns the module which is currently running. Used for debugging.'''
@@ -115,44 +102,47 @@ class Workspace:
 				self.__runningModule = module.parent
 			else:
 				self.__runningModule = module
-			module.run(self)
+			module.run()
 		self.__runningModule = mc
 	
-	def use(self,mod : Module):
+	def use(self,mod : Type[T]):
 		'''
 		Register the specific module as a non-default implementation.
 		The module is only activated when any of it's dependents are activated.
 		'''
-		key = mod.key()
-		assert key not in self.__inactiveModules and key not in self.__activeModules, (
-			"use() or add() was already invoked for this module!")
+		mod = mod.manifest()
+		assert issubclass(mod, Module), "Only subclasses of Module are accepted!"
+		key = mod.key
+		assert key is not None, "key may not be None"
+		assert key not in self.__inactiveModules and key not in self.__activeModules, \
+			"use() or add() was already invoked for this module!"
 		self.__inactiveModules[key] = mod
-
 		return mod
 	
 	def append(self, fnc):
 		'''
-		Appends a custom function to be executed directly after the run invocation of currently active modules.
-		Can be used both in the discovery and execution phase. The function's only argument will be this workspace.
+		Append a custom function to be executed directly after the run invocation of currently active modules.
+		Can be used both in the discovery and execution phase. The function receives no arguments.
 		'''
 		self.__topology.append(AppendHook(fnc, self.__runningModule))
 	
-	def add(self,mod: T) -> T:
+	def add(self,mod : Type[T]) -> T:
 		'''
 		Register and activate the specific module.
 		The module instance is returned.
 		'''
+		mod = mod.manifest()
 		assert self.__topologyIndex == 0, "Cannot add modules after run is called!"
-		mod: Module = mod.manifest()
-		assert isinstance(mod, Module), "Only subclasses of Module are accepted!"
-		key = mod.key()
+		assert issubclass(mod, Module), "Only subclasses of Module are accepted!"
+		key = mod.key
+		assert key is not None, "key may not be None"
 		if key in self.__activeModules:
-			assert self.__activeModules[key] is not None, "Recursive call to add() with key "+str(key)+"!"
+			assert self.__activeModules[key] is not None, f"Recursive call to add() with key {key}!"
 			return self.__activeModules[key]
 		else:
 			mod = self.__inactiveModules.pop(key, mod)
 			self.__activeModules[key] = None
-			mod.activate(self)
-			self.__topology.append(mod)
-			self.__activeModules[key] = mod
-			return mod
+			ins = mod(ModuleInitContext(self))
+			self.__topology.append(ins)
+			self.__activeModules[key] = ins
+			return ins

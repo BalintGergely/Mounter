@@ -1,466 +1,137 @@
-from mounter.path import Path
-from typing import Iterator, Set, Dict, Awaitable, Iterable, Callable, Any, NoReturn, Tuple, Final, List
-from itertools import chain, tee
+
 import asyncio
 import subprocess
-import mounter.workspace as workspace
-import mounter.progress as progress
-from typing import final
+import functools
+from typing import TypeVar, TypeVarTuple, Tuple, Generic, Awaitable, Callable, Type
+from mounter.path import Path
+from mounter.workspace import Module, ModuleInitContext, Workspace
+from mounter.progress import Progress
+from mounter.persistence import Persistence
+from mounter.delta import FileDeltaChecker
+from asyncio import gather, Future, Task
 
-class Operation:
-	'''
-	A runnable async operation that has a set of states required for it to run and a set of states it causes.
+A = TypeVarTuple('A')
+T = TypeVar('T')
 
-	States are identified by hashable objects. They are not tracked and are not required to have a way to test their presence.
-	'''
-	def getResultStates(self) -> Iterable:
-		'''States this operation will meet.'''
-		return ()
+class Asyncio(Module):
+	"""
+	Module that sets up an asyncio event loop.
 
-	def getRequiredStates(self) -> Iterable:
-		'''States this operation requires.'''
-		return ()
+	As a rule, modules should not leave async tasks
+	hanging when they exit, because those tasks
+	can outlive other modules that rely on there
+	being no active async tasks.
 
-	def getProgressLength(self):
+	Either cancel the tasks or ensure they are completed
+	with run_until_complete.
+	"""
+	def __init__(self, context) -> None:
+		super().__init__(context)
+		self.__runner = asyncio.Runner()
+	
+	def run(self):
+		with self.__runner:
+			self._downstream()
+	
+	def getLoop(self):
+		return self.__runner.get_loop()
+		
+	def createTask(self,coro):
+		return self.getLoop().create_task(coro)
+	
+	def completeLater(self,task : Awaitable):
 		"""
-		Returns the number of times the progress callback will be invoked for this Operation.
+		Schedules the awaitable to be completed after all modules are loaded.
 		"""
-		assert False, f"getSubdivisionCount() method has not been overridden for {type(self)}"
-
-	async def runAsync(self, progress):
-		return self.run(progress)
-	
-	def run(self, progress):
-		assert False, f"run() method has not been overridden for {type(self)}"
-		
-	def opHash(self):
-		assert False, f"opHash() method has not been overridden for {type(self)}"
-
-@final
-class Gate(Operation):
-	'''
-	Class to attach metadata to operations.
-	Can be used to add required or result states in cases where those cannot be normally deduced.
-	Gates can also be marked goals when performing operations selectively.
-	'''
-	__required: Set
-	__result: Set
-	__internal: Operation
-	__goal: bool
-	__name: str
-	def __init__(self,
-			internal: Operation = None,
-			requires: Iterable = ...,
-			produces: Iterable = ...,
-			goal = ...,
-			name = ...,
-			base = ...):
-		if isinstance(base,Gate):
-			if internal is ...:
-				internal = base.__internal
-			if requires is ...:
-				requires = base.__required
-			if produces is ...:
-				produces = base.__result
-			if goal is ...:
-				goal = base.__goal
-			if name is ...:
-				name = base.__name
-		self.__required = set() if requires is ... else set(requires)
-		self.__result = set() if produces is ... else set(produces)
-		self.__goal = False if goal is ... else goal
-		self.__name = None if name is ... else name
-		if internal is not None:
-			self.__required.update(internal.getRequiredStates())
-			self.__result.update(internal.getResultStates())
-			if isinstance(internal, Gate):
-				self.__internal = internal.__internal
-			else:
-				self.__internal = internal
-		else:
-			self.__internal = None
-		
-		self.context = None
-	
-	def getRequiredStates(self) -> Iterable:
-		yield from self.__required
-	
-	def getResultStates(self) -> Iterable:
-		yield from self.__result
-	
-	def getProgressLength(self):
-		if self.__internal is not None:
-			return self.__internal.getProgressLength()
-		else:
-			return 0
-	
-	def isGoal(self) -> bool:
-		'''Whether running this gate is a goal.'''
-		return self.__goal
-	
-	def hasInternal(self) -> bool:
-		'''Whether this gate does anything when ran.'''
-		return self.__internal is not None
-	
-	def hasRequired(self) -> bool:
-		'''Whether this gate has any required states.'''
-		return bool(self.__required)
-	
-	def hasResult(self) -> bool:
-		'''Whether this gate has any result states.'''
-		return bool(self.__result)
-	
-	def nonGoal(self) -> 'Gate':
-		return Gate(goal=False,base=self)
-
-	async def runAsync(self, progress):
-		if self.__internal is not None:
-			return await self.__internal.runAsync(progress)
-	
-	def run(self, progress):
-		if self.__internal is not None:
-			return self.__internal.run(progress)
-	
-	def opHash(self):
-		if self.__internal is None:
-			return ""
-		else:
-			return self.__internal.opHash()
-	
-	def __str__(self):
-		definition = ""
-		if self.__name is not None:
-			definition = f"\"{self.__name}\": "
-		if self.__internal is not None:
-			return definition + str(self.__internal).replace("\n","\n"+definition)
-		definition = "\n".join([definition+"Output: "+str(f) for f in self.__result]+[definition+"Input: "+str(f) for f in self.__required])
-		#if self.__internal is not None:
-		#	definition = definition + "\n" + str(self.__internal)
-		if self.__goal:
-			definition = "Goal: "+definition.replace("\n","\nGoal: ")
-		return definition
-
-	def __hash__(self) -> int:
-		h = hash(self.__goal) ^ hash(self.__internal) ^ hash(self.__name)
-		for req in self.__required:
-			h = h ^ hash(req)
-		for res in self.__result:
-			h = h ^ res
-		return h
-
-class Silence(Operation):
-	'''
-	Silences an internal operation. Instead of running it, print(str(self)) will be called.
-	'''
-	__internal: Operation
-	def __init__(self, internal: Operation):
-		self.__internal = internal
-	
-	def getRequiredStates(self) -> Iterable[Path]:
-		return self.__internal.getRequiredStates()
-	
-	def getResultStates(self) -> Iterable[Path]:
-		return self.__internal.getResultStates()
-
-	def getProgressLength(self):
-		return 0
-	
-	def run(self, progress):
-		print(str(self))
-	
-	def opHash(self):
-		return None # Since we do not actually perform the operation, op hash is None.
-	
-	def __str__(self):
-		return "Silenced: "+str(self.__internal).replace("\n","\nSilenced: ")
-
-class Copy(Operation):
-	'''
-	Operation to copy a single file to single target file.
-	Requirement is the source file existing, result is the target file existing.
-	'''
-	__source: Path
-	__target: Path
-
-	def __init__(self, source: Path, target: Path):
-		self.__source = source
-		self.__target = target
-	
-	def getRequiredStates(self):
-		yield self.__source
-	
-	def getResultStates(self):
-		yield self.__target
-	
-	def getProgressLength(self):
-		return 1
-
-	def run(self, progress):
-		self.__source.opCopyTo(self.__target)
-		progress()
-	
-	def opHash(self):
-		return f"cat {self.__source} > {self.__target}"
-	
-	def __str__(self):
-		return "Copy: "+str(self.__source)+"\nTo: "+str(self.__target)
-
-class CreateDirectories(Operation):
-	'''
-	Operation that creates an empty directory.
-	'''
-	__directories: Tuple[Path]
-	__empty: bool
-
-	def __init__(self, *directories: Path, empty: bool = False):
-		self.__directories = tuple(directories)
-		self.__empty = empty
-	
-	def getProgressLength(self):
-		return 1
-	
-	def run(self, progress):
-		for d in self.__directories:
-			if d.isDirectory():
-				if self.__empty:
-					for file in d.getPostorder(includeSelf=False):
-						file.opDelete()
-			else:
-				d.opCreateDirectories()
-		progress()
-	
-	def getResultStates(self) -> Iterable:
-		return self.__directories
-
-	def opHash(self):
-		if self.__empty: # Whatever works.
-			return ";".join(f"mkdir -p --clean {p}" for p in sorted(self.__directories))
-		else:
-			return ";".join(f"mkdir -p {p}" for p in sorted(self.__directories))
-
-	def __str__(self) -> str:
-		if self.__empty:
-			return "\n".join(f"Create empty directory: {p}" for p in self.__directories)
-		else:
-			return "\n".join(f"Create directory: {p}" for p in self.__directories)
-
-class Cluster(Operation):
-	'''
-	An operation that performs all of a given set of operations
-	ensuring correct ordering and parallelism.
-	'''
-	__operations: List[Operation]
-	__resultStates: Dict
-	def __init__(self,all: Iterable[Operation]) -> None:
-		self.__operations = tuple(all)
-		self.__resultStates = {}
-		self.__requiredStates = set()
-		for (index,op) in enumerate(self.__operations):
-			self.__requiredStates.update(op.getRequiredStates())
-			for state in op.getResultStates():
-				assert state not in self.__resultStates, f"Duplicate state {state}"
-				self.__resultStates[state] = index
-		
-		self.__requiredStates.difference_update(self.__resultStates.keys())
-	
-	def getRequiredStates(self) -> Iterable[Path]:
-		yield from self.__requiredStates
-	
-	def getResultStates(self) -> Iterable[Path]:
-		yield from self.__resultStates.keys()
-	
-	def getProgressLength(self):
-		return sum(o.getProgressLength() for o in self.__operations)
-
-	def __atopo(self,index,ops,progress):
-		'''
-		Returns the task for the specific operation index.
-		If the task has not been generated yet, generates it.
-		'''
-		o = ops[index]
-		if isinstance(o,tuple):
-			return o[0]
-		
-		op : Operation = o
-		
-		toWait: List[Operation] = []
-		for state in op.getRequiredStates():
-			if state in self.__resultStates:
-				toWait.append(self.__atopo(self.__resultStates[state],ops,progress))
-		
-		async def runWhenReady():
-			for t in toWait:
-				await t
-			return await op.runAsync(progress)
-
-		task = asyncio.create_task(runWhenReady())
-		ops[index] = (task,)
-
+		task = asyncio.ensure_future(task)
+		self.ws.append(lambda: self.getLoop().run_until_complete(task))
 		return task
-	
-	async def runAsync(self, progress):
-		ops = list(self.__operations)
-		ts = [self.__atopo(x,ops,progress) for x in range(len(self.__operations))]
-		for t in ts:
-			await t
-	
-	def __stopo(self,index,ops) -> Iterator[Operation]:
-		'''
-		Yields all requisite operations, finally the operation at index.
-		'''
-		op = ops[index]
-		if op is not None:
-			ops[index] = None
-			for state in op.getRequiredStates():
-				if state in self.__resultStates:
-					yield from self.__stopo(self.__resultStates[state],ops)
-			yield op
-	
-	def run(self,progress):
-		ops = list(self.__operations)
-		for x in range(len(ops)):
-			for t in self.__stopo(x,ops):
-				t.run(progress)
-	
-	def opHash(self):
-		l = [f"[{h.opHash()}]" for h in self.__operations]
-		l.sort()
-		return "\n".join(l)
 
-	def __str__(self) -> str:
-		return "\n".join(str(h) for h in self.__operations)
+	def completeNow(self,task : Awaitable):
+		"""
+		Block until the specified Awaitable is done. Return it's result or raise it's exception.
+		"""
+		task = asyncio.ensure_future(task)
+		return self.getLoop().run_until_complete(task)
 
-class Sequence(Operation):
-	'''
-	An operation that performs the given list of operations in sequence.
-	'''
-	def __init__(self,all: Iterable[Operation]) -> None:
-		self.__operations = tuple(all)
-		self.__resultStates = set()
-		self.__requiredStates = set()
-		for op in self.__operations:
-			for required in op.getRequiredStates():
-				if required not in self.__resultStates:
-					self.__requiredStates.add(required)
-			for result in op.getResultStates():
-				assert result not in self.__requiredStates, "Bad order of operations in a Sequence!"
-				assert result not in self.__resultStates, f"Duplicate state {result}"
-				self.__resultStates.add(result)
-	
-	def getRequiredStates(self) -> Iterable[Path]:
-		yield from self.__requiredStates
-	
-	def getResultStates(self) -> Iterable[Path]:
-		yield from self.__resultStates
-	
-	def getProgressLength(self):
-		return sum(o.getProgressLength() for o in self.__operations)
-	
-	async def runAsync(self, progress):
-		for op in self.__operations:
-			await op.runAsync(progress)
-	
-	def run(self, progress):
-		for op in self.__operations:
-			op.run(progress)
-	
-	def opHash(self):
-		return "\n".join(f"[{h.opHash()}]" for h in self.__operations)
+	async def runCommand(self, command, input = bytes()) -> Tuple[int, bytes, bytes]:
+		commandStr = subprocess.list2cmdline(str(c) for c in command)
 
-	def __str__(self) -> str:
-		return "\n".join(str(h) for h in self.__operations)
+		proc = await asyncio.create_subprocess_shell(commandStr,
+			stdout=asyncio.subprocess.PIPE,
+			stderr=asyncio.subprocess.PIPE,
+			stdin=asyncio.subprocess.PIPE)
 
-class Command(Operation):
-	'''Operation to run an asyncio command.'''
-	__command: Tuple[str]
-	def __init__(self, *args: str):
-		self.__command = tuple(str(k) for k in args)
-	
-	def getProgressLength(self):
-		return 1
-
-	async def runAsync(self, progress):
-		proc = await asyncio.create_subprocess_shell(subprocess.list2cmdline(self.__command),
-		stdout=asyncio.subprocess.PIPE,
-		stderr=asyncio.subprocess.PIPE)
-		
-		stdout, stderr = await proc.communicate()
+		stdout, stderr = await proc.communicate(input)
 
 		print(stdout.decode(), end="")
 		print(stderr.decode(), end="")
 
-		if proc.returncode != 0:
-			raise Exception(subprocess.list2cmdline(self.__command))
+		return (proc.returncode, stdout, stderr)
 
-		progress()
+class instant(Generic[T],Awaitable[T]):
+	def __init__(self, value : T) -> None:
+		self.__value = value
 	
-	def run(self, progress):
-		proc = subprocess.Popen(self.__command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-		stdout, stderr = proc.communicate()
-		print(stdout.decode(), end="")
-		print(stderr.decode(), end="")
-		if proc.returncode != 0:
-			raise Exception(subprocess.list2cmdline(self.__command))
-		
-		progress()
+	def __next__(self): raise StopIteration(self.__value)
+	def __await__(self): return self
+	def __iter__(self): return self
+	def send(self, input): assert input is None; raise StopIteration(self.__value)
+
+def manifest() -> Type[Asyncio]:
+	return Asyncio
+
+# Don't forget asyncio.gather which is super useful
+
+def once(fun : Callable[[*A],T]) -> Callable[[*A],T]:
+	"""
+	The decorated method is run only once per unique set of arguments.
+	This does NOT support default arguments.
+	"""
+	attrName = f"op{id(fun)}"
+	@functools.wraps(fun)
+	def wrapper(self, *args, **kwargs):
+		key = (args,frozenset(kwargs.items()))
+		cache = getattr(self, attrName, None)
+		if cache is None:
+			cache = dict()
+			setattr(self, attrName, cache)
+		if key not in cache:
+			cache[key] = fun(self, *args)
+		return cache[key]
+	return wrapper
+
+def task(coro : Callable[[*A],Awaitable[T]]) -> Callable[[*A],Awaitable[T]]:
+	"""
+	The decorated coroutine is wrapped in an asyncio task. Watch out for hanging tasks!
+	"""
+	@functools.wraps(coro)
+	def wrapper(*args,**kwargs):
+		return asyncio.ensure_future(coro(*args,**kwargs))
+	return wrapper
+
+def op(arg):
+	return once(task(arg))
+
+class CopyOps(Module):
+	def __init__(self, context) -> None:
+		super().__init__(context)
+		self.ws.add(Asyncio)
+		self.ws.add(Progress)
 	
-	def opHash(self):
-		return " ".join(f"\"{k}\"" for k in self.__command)
-
-	def __str__(self):
-		return "Execute: "+(subprocess.list2cmdline(self.__command))
-
-class Module(workspace.Module):
-
-	def __init__(self,useAsync = False,printProgress = False):
-		super().__init__(key = __file__)
-		self.__useAsync = useAsync
-		self.__printProgress = printProgress
+	def run(self):
+		return super().run()
 	
-	def activate(self, context):
-		if self.__useAsync:
-			context.add(workspace.Asyncio)
-		self.__ops: List[Operation] = []
-		self.__res: Dict[str,workspace.Module] = {}
-	
-	def filterOperations(self, operations: List[Operation], context):
-		return operations
-	
-	def _runOperation(self, context, operation : Operation):
-		maxProgress = operation.getProgressLength()
-		progressCallback = lambda _: None
-		if self.__printProgress:
-			progressCallback = progress.progress(operation.getProgressLength())
-		
-		if self.__useAsync:
-			context[workspace.Asyncio].wait(operation.runAsync(progressCallback))
-		else:
-			operation.run(progressCallback)
-		if self.__printProgress:
-			progressCallback.end()
-	
-	def run(self, context):
-
-		self.__context = context
-
-		context.run()
-
-		end = Cluster(self.filterOperations(self.__ops, context))
-		f = list(end.getRequiredStates())
-		assert len(f) == 0, "\n".join(["Required states have not been accounted for:"]+[str(k) for k in f])
-		self._runOperation(context, end)
-
-		self.__ops = None
-	
-	def add(self,op: Operation):
-		self.__ops.append(op)
-		for r in op.getResultStates():
-			# It is best to catch an error like this here and now.
-			if r in self.__res:
-				prevMod = self.__res[r]
-				nowMod = self.__context.getCurrentExecutingModule()
-				if prevMod is nowMod:
-					raise Exception(f"Duplicate state {r}, registered by module {prevMod}")
-				else:
-					raise Exception(f"Duplicate state {r}, registered by module {prevMod} then {nowMod}")
-			self.__res[r] = self.__context.getCurrentExecutingModule()
+	@op
+	async def copyFile(self, sourcePath : Path, targetPath : Path):
+		with self.ws[Progress].register() as pu:
+			pu.setName(f"Copy {sourcePath} to {targetPath}")
+			deltaChecker = self.ws[FileDeltaChecker]
+			self.ws[Persistence].lookup(self)
+			data = self.getFileProperties(targetPath)
+			if deltaChecker.query(sourcePath) != data.get("sourceHash") \
+			or not targetPath.isPresent():
+				pu.setRunning()
+				sourcePath.opCopyTo(targetPath)
+			else:
+				pu.setUpToDate()

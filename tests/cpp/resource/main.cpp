@@ -3,7 +3,7 @@
 #include <fstream>
 
 int main(){
-	std::ifstream file("resource.txt");
+	std::ifstream file("bin/resource.txt");
 	
 	while(true){
 		char c;
