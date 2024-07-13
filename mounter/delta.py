@@ -11,7 +11,8 @@ TYPE_DIR = b'd'
 
 class PathCheckObject():
 	__ignored = [
-		PathSet("**/__pycache__/**")
+		PathSet("**/__pycache__/**"),
+		PathSet("**/.git/**")
 	]
 
 	def __init__(self, checker : 'FileDeltaChecker', path : PathLike, store : Dict[str,object]) -> None:

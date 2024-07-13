@@ -49,8 +49,9 @@ class Persistence(Module):
 	
 	def _savePersistenceFile(self):
 		assert self._root is not None
+		s = json.dumps(self._root,indent='\t',ensure_ascii = False,sort_keys = True)
 		with self._file.open("w",encoding="utf-8") as output:
-			json.dump(self._root,output,indent='\t')
+			output.write(s)
 		self._root = None
 	
 	def lookup(self, obj : Module) -> Dict:

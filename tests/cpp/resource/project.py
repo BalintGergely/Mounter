@@ -1,5 +1,5 @@
 
-from mounter.operation import Asyncio
+from mounter.operation import AsyncOps
 from mounter.operation.files import FileManagement
 from mounter.languages.cpp import CppGroup, CppProject
 
@@ -9,7 +9,7 @@ class manifest(CppProject):
 		self.mains.add("main.cpp")
 	
 	async def onCompile(self, mainGroup: CppGroup):
-		self.ws[Asyncio].completeLater(
+		self.ws[AsyncOps].completeLater(
 			self.ws[FileManagement].copyFileTo(
 				self._dir.subpath("resource.txt"),
 				await mainGroup.getBinDirectory()

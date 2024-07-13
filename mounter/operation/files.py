@@ -13,7 +13,7 @@ class FileManagement(Module):
 	
 	def run(self):
 		self.__store : Dict[str,Dict[str,Dict]] = self.ws[Persistence].lookup(self)
-		self.__owner : Dict[Path,str] = dict()
+		self.__owner : Dict[str,str] = dict()
 		try:
 			self._downstream()
 		finally:
@@ -31,8 +31,8 @@ class FileManagement(Module):
 		"""
 		key = str(path)
 		assert key not in self.__owner
-		self.__owner[key] = managingObject
 		id = persistenceTypeId(managingObject)
+		self.__owner[key] = id
 		if id not in self.__store:
 			self.__store[id] = dict()
 		store = self.__store[id]
