@@ -200,9 +200,11 @@ class ClangCppGroup(AggregatorCppGroup):
 			deltaChecker = self.ws[FileDeltaChecker]
 
 			dependencyHash = []
+			await RED_LIGHT
 			dependencyHash.append(deltaChecker.query(sourceFile))
 
 			for i in sorted(includes):
+				await RED_LIGHT
 				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**")))
 			
 			cmd = ["clang++",sourceFile,"-CC","--preprocess","-o",outputFile]
@@ -266,6 +268,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				.withExtension(extension)
 
 			dependencyHash = []
+			await RED_LIGHT
 			dependencyHash.append(deltaChecker.query(preFile))
 
 			cmd = ["clang++",preFile,"-o",outputFile]
@@ -349,9 +352,11 @@ class ClangCppGroup(AggregatorCppGroup):
 			isMain = outputFile.hasExtension("exe")
 			dependencyHash = []
 			for o in sorted(allObjects):
+				await RED_LIGHT
 				dependencyHash.append(deltaChecker.query(o))
 			dependencyHash.append(None)
 			for l in sorted(staticLibraries):
+				await RED_LIGHT
 				dependencyHash.append(deltaChecker.query(l))
 				
 			cmd = ["clang++","-o",outputFile] + list(allObjects)

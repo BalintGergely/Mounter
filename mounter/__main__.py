@@ -7,6 +7,7 @@ from mounter.path import Path
 from mounter.persistence import Persistence
 from mounter.goal import GoalTracker
 from mounter.progress import Progress
+from mounter.operation import AsyncOps
 
 root = Path("")
 obj = Path("obj")
@@ -20,6 +21,7 @@ parser.add_argument('--verbose', action="store_true", help="Print detailed infor
 parser.add_argument('--disassembly', action="store_true", help="Use textual intermediate representation, wherever applicable.")
 parser.add_argument('--debug', action="store_true", help="Compile debug information, wherever applicable.")
 parser.add_argument('--optimalize', action="store_true", help="Enable optimalizations.")
+parser.add_argument('--sequential', action="store_true", help="Use deterministic sequential execution.")
 
 w = Workspace()
 
@@ -49,6 +51,11 @@ if GoalTracker in w:
 if Persistence in w:
 	persistence = w[Persistence]
 	persistence.setPersistenceFile(obj.subpath("mounterPersist.json"))
+
+if AsyncOps in w:
+	ops = w[AsyncOps]
+	if args.sequential:
+		ops.disableAsync()
 
 if cpp.ClangModule in w:
 	cppManifest = w[cpp.ClangModule]

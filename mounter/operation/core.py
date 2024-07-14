@@ -2,7 +2,7 @@
 import asyncio
 import subprocess
 import functools
-from typing import TypeVar, TypeVarTuple, Tuple, Generic, Awaitable, Callable, Type, Iterator
+from typing import TypeVar, TypeVarTuple, Tuple, Generic, Awaitable, Callable, Type, Iterator, Coroutine, List
 from mounter.path import Path
 from mounter.workspace import Module, ModuleInitContext, Workspace
 from mounter.progress import Progress
@@ -12,91 +12,104 @@ from mounter.delta import FileDeltaChecker
 A = TypeVarTuple('A')
 T = TypeVar('T')
 
-class CommandFail(BaseException):
-	def __init__(self, command : str, returnCode : int, stdout : bytes, stderr : bytes, expectedReturnCode : int = 0) -> None:
-		self.__command = command
-		self.__code = returnCode
-		self.__stdout = stdout
-		self.__stderr = stderr
-		self.__expected = expectedReturnCode
+class _asyncOpsTaskWrapper(Generic[T]):
+	def __init__(self, coro : Awaitable[T], loop, startNow) -> None:
+		self.__loop = loop
+		self.__isActive = False
+		self.__task = coro
+		if startNow:
+			self._activate()
 	
-	def printDetails(self):
-		print(f"Fail: {self.__command}")
-		if self.__expected == 0:
-			print(f"Exited with code {self.__code}")
-		else:
-			print(f"Exited with code {self.__code} (Expected {self.__expected})")
-		print(self.__stdout.decode(), end="")
-		print(self.__stderr.decode(), end="")
+	def _finalize(self):
+		if not self.__isActive:
+			if isinstance(self.__task,Coroutine):
+				self.__task.close()
+			return False
+		return True
 	
-	def __str__(self):
-		return "CommandFail(...)"
+	def _isActive(self):
+		return self.__isActive
 	
-	def __repr__(self) -> str:
-		return "CommandFail(...)"
+	def _activate(self) -> Awaitable[T]:
+		if not self.__isActive:
+			self.__task = asyncio.ensure_future(self.__task, loop = self.__loop)
+			self.__isActive = True
+		return self.__task
+	
+	def __await__(self):
+		self._activate()
+		return (yield from self.__task)
+
+	__iter__ = __await__
+
+	def __del__(self):
+		if isinstance(self.__task,Coroutine):
+			self.__task.close()
+
+async def awaitAll(*args):
+	return tuple([await t for t in args])
 
 class AsyncOps(Module):
 	"""
 	Module for async execution.
 
-	As a rule, modules should not leave async tasks
-	hanging when they exit, because those tasks
-	can outlive other modules that rely on there
-	being no active async tasks.
+	As a rule, ALL tasks created must be awaited at some point.
 
-	Either cancel the tasks or ensure they are completed
-	with run_until_complete.
-
-	DO NOT use asyncio! It is NOT ALWAYS COMPATIBLE!
+	DO NOT use asyncio! It is NOT COMPATIBLE!
 	"""
 	def __init__(self, context) -> None:
 		super().__init__(context)
 		self.__runner = asyncio.Runner()
-		self.__remainingCommandFails = 1
+		self.__asyncEnabled = True
+		self.__asyncOpList : List[_asyncOpsTaskWrapper] = []
 	
-	def __handleCommandFail(self, ex : CommandFail):
-		if self.__remainingCommandFails != 0:
-			self.__remainingCommandFails -= 1
-			ex.printDetails()
-	
-	def __handleException(self, loop, context):
-		if "exception" in context:
-			ex = context["exception"]
-			if isinstance(ex,CommandFail):
-				return self.__handleCommandFail()
-		self.__runner.get_loop().default_exception_handler(context)
-	
+	def disableAsync(self):
+		self.__asyncEnabled = False
+
 	def run(self):
 		with self.__runner:
+			success = False
 			try:
-				self.__runner.get_loop().set_exception_handler(self.__handleException)
 				self._downstream()
-			except CommandFail as f:
-				self.__handleCommandFail(f)
+				success = True
+			finally:
+				notActiveCounter = 0
+				for op in self.__asyncOpList:
+					if not op._finalize():
+						notActiveCounter += 1
+				if notActiveCounter != 0 and success:
+					print(f"Warning: {notActiveCounter} tasks were never awaited!")
 	
 	def __getLoop(self):
 		return self.__runner.get_loop()
 	
-	def ensureFuture(self,coro):
-		return asyncio.ensure_future(coro)
-		
-	def createTask(self,coro):
-		return self.__getLoop().create_task(coro)
+	def createTask(self,coro : Awaitable[T]) -> Awaitable[T]:
+		assert not isinstance(coro,_asyncOpsTaskWrapper)
+		wrapper = _asyncOpsTaskWrapper(coro, self.__getLoop(), self.__asyncEnabled)
+		self.__asyncOpList.append(wrapper)
+		return wrapper
 	
-	def completeLater(self,task : Awaitable):
-		"""
-		Schedules the awaitable to be completed after all modules are loaded.
-		"""
-		task = asyncio.ensure_future(task)
-		self.ws.append(lambda: self.__getLoop().run_until_complete(task))
-		return task
+	def ensureFuture(self,coro : Awaitable[T]) -> Awaitable[T]:
+		if isinstance(coro,_asyncOpsTaskWrapper):
+			return coro
+		else:
+			return self.createTask(coro)
 
-	def completeNow(self,task : Awaitable):
+	def completeNow(self,task : Awaitable[T]) -> T:
 		"""
 		Block until the specified Awaitable is done. Return it's result or raise it's exception.
 		"""
-		task = asyncio.ensure_future(task)
-		return self.__getLoop().run_until_complete(task)
+		task : _asyncOpsTaskWrapper = self.ensureFuture(task)
+		asyncFuture = task._activate()
+		return self.__getLoop().run_until_complete(asyncFuture)
+	
+	def completeLater(self,task : Awaitable[T]) -> Awaitable[T]:
+		"""
+		Schedules the awaitable to be completed after all modules are loaded.
+		"""
+		task = self.ensureFuture(task)
+		self.ws.append(lambda: self.completeNow(task))
+		return task
 
 	async def runCommand(self, command, input = bytes(), expectedReturnCode = 0) -> Tuple[int, bytes, bytes]:
 		commandStr = subprocess.list2cmdline(str(c) for c in command)
@@ -108,18 +121,17 @@ class AsyncOps(Module):
 
 		stdout, stderr = await proc.communicate(input)
 
-		if proc.returncode != expectedReturnCode:
-			raise CommandFail(commandStr, proc.returncode, stdout, stderr, expectedReturnCode)
-		
 		if stdout != b'' or stderr != b'':
 			print(f"Output: {commandStr}")
 			print(stdout.decode(), end="")
 			print(stderr.decode(), end="")
 
+		assert proc.returncode == expectedReturnCode
+		
 		return (stdout, stderr)
 	
 	def gather(self, *commandSeq : Awaitable) -> Awaitable[Tuple[*A]]:
-		return asyncio.gather(*commandSeq)
+		return self.createTask(awaitAll(*[self.ensureFuture(t) for t in commandSeq]))
 
 class instant(Generic[T],Awaitable[T]):
 	def __init__(self, value : T) -> None:
@@ -167,6 +179,18 @@ def task(coro : Callable[[*A],Awaitable[T]]) -> Callable[[*A],Awaitable[T]]:
 
 def op(arg):
 	return once(task(arg))
+
+class __light():
+	def __init__(self) -> None:
+		pass
+
+	def __await__(self):
+		yield None
+	
+	__iter__ = __await__
+
+RED_LIGHT = __light()
+"""Wait on this before any synchronous operation."""
 
 class CopyOps(Module):
 	def __init__(self, context) -> None:

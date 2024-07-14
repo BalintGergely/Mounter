@@ -44,11 +44,13 @@ class FileManagement(Module):
 	async def copyFile(self, sourcePath : Path, targetPath : Path):
 		with self.ws[Progress].register() as pu:
 			pu.setName(f"Copy {sourcePath} to {targetPath}")
+			await RED_LIGHT
 			sourceHash = self.ws[FileDeltaChecker].query(sourcePath)
 			pu.setRunning()
 			data = self.lock(targetPath,self)
 			if sourceHash != data.get("sourceHash",None) \
 			or not targetPath.isPresent():
+				await RED_LIGHT
 				sourcePath.opCopyTo(targetPath)
 				data["sourceHash"] = sourceHash
 			else:
