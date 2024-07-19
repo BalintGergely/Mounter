@@ -2,7 +2,7 @@ import pathlib
 import shutil
 import re
 import os
-from typing import Hashable, Final, List, Tuple
+from typing import Hashable, Final, List, Tuple, Self
 
 class Path(Hashable):
 	"""
@@ -10,20 +10,17 @@ class Path(Hashable):
 	This always uses forward slash '/' for separators.
 	"""
 	__p: Final[pathlib.Path]
-	def __new__(cls,arg,*_,**__):
-		if cls is Path and type(arg) is Path:
-			return arg
-		else:
-			return super().__new__(cls)
-	
-	def __init__(self,path):
-		if self is path:
-			return # Thanks Python Spaghetti
-		self.__s = None
+	def __new__(cls,path):
+		if cls is Path and type(path) is Path:
+			return path
+		self = super().__new__(cls)
 		if isinstance(path,Path):
 			self.__p = path.__p
+			self.__s = path.__s
 		else:
 			self.__p = pathlib.Path(path).absolute().resolve()
+			self.__s = None
+		return self
 	
 	def __hash__(self):
 		return self.__p.__hash__()
@@ -81,9 +78,6 @@ class Path(Hashable):
 	
 	def relativeTo(self,other: 'Path') -> 'RelativePath':
 		return RelativePath(self,self.__p.relative_to(other.__p))
-	
-	def relativeToParent(self) -> 'RelativePath':
-		return self.relativeTo(self.getAncestor())
 	
 	def relativeToAncestor(self,steps : int = 1) -> 'RelativePath':
 		return self.relativeTo(self.getAncestor(steps))
@@ -247,10 +241,10 @@ class RelativePath(Path):
 	"""
 	Still represents an absolute file path, but has a relative part for reference.
 	"""
-	_subpath: Final[pathlib.Path] # both this and path point to the same file.
-	def __init__(self,absolute,subpath):
-		super().__init__(absolute)
+	def __new__(cls, path, subpath):
+		self = super().__new__(cls, path)
 		self._subpath = subpath
+		return self
 
 	def moveTo(self,target: Path) -> 'RelativePath':
 		return RelativePath(target.getIr().joinpath(self._subpath),self._subpath)
@@ -258,17 +252,14 @@ class RelativePath(Path):
 	def relativeStr(self):
 		return self._subpath.as_posix()
 
+	def __repr__(self):
+		return f"RelativePath({repr(str(self))},{repr(self._subpath)})"
+
 class PathSet(Hashable):
 	"""
 	Represents a set of Paths, defined by a pattern.
 	All paths are valid patterns representing the singleton set containing that Path.
 	"""
-
-	def __new__(cls,arg):
-		if cls is PathSet and type(arg) is PathSet:
-			return arg
-		else:
-			return object.__new__(cls)
 
 	# I had the idea to base this off of either regex or glob patterns,
 	# but both use special characters that can occur in path names.
@@ -295,7 +286,15 @@ class PathSet(Hashable):
 
 	__core = re.compile(r"(/?.*?)?((?=[^/]*[*?]).*?)?(/)?")
 
-	def __init__(self, pattern : str) -> None:
+	__root : Path | None
+	__pattern : str
+	__compiled : Tuple[str]
+	__directoryOnly : bool
+
+	def __new__(cls, pattern : 'str | Path | PathSet'):
+		if type(pattern) is PathSet:
+			return pattern
+		self = super().__new__(cls)
 		if type(pattern) is Path:
 			self.__root = pattern
 			self.__pattern = str(pattern)
@@ -318,6 +317,7 @@ class PathSet(Hashable):
 			self.__compiled = tuple(PathSet.__compileSingleElement(k) for k in ndet.split("/"))
 		self.__pattern = pattern
 		self.__directoryOnly = bool(dir)
+		return self
 	
 	def __partialMatch(pattern : List[re.Pattern | None], elems : List[str]) -> Tuple[bool,bool]:
 		"""

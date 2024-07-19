@@ -282,7 +282,6 @@ class ClangCppGroup(AggregatorCppGroup):
 				cmd.append("-emit-llvm")
 			if self.__debug:
 				cmd.append("--debug")
-				cmd.append("-O0")
 			if self.__optimalize:
 				cmd.append("-O3")
 				if self.__useLLVM:
@@ -296,7 +295,7 @@ class ClangCppGroup(AggregatorCppGroup):
 
 			if self.__debug and not data.get("debug",None) \
 			or data.get("args",None) != args \
-			or self.__optimalize and not data.get("optimalize",None) \
+			or data.get("optimalize",False) != self.__optimalize \
 			or not data.get("stable",None) \
 			or data.get("dependencyHash",None) != dependencyHash \
 			or not outputFile.isPresent():
@@ -384,7 +383,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			
 			if self.__debug and not data.get("debug",None) \
 			or data.get("args",None) != args \
-			or self.__optimalize and not data.get("optimalize",None) \
+			or data.get("optimalize",False) != self.__optimalize \
 			or not data.get("stable",None) \
 			or data.get("dependencyHash",None) != dependencyHash \
 			or not outputFile.isPresent():

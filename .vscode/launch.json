@@ -3,7 +3,7 @@
 	"configurations": [
 		{
 			"name": "Python: Attach debugger",
-			"type": "python",
+			"type": "debugpy",
 			"request": "attach",
 			"processId":"${command:pickProcess}",
 			"justMyCode": true

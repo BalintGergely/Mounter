@@ -114,10 +114,10 @@ class Progress(Module):
 
 		for (a,b) in itertools.pairwise(_divy(max, dmax)):
 			subList = [p.getState() for p in self.__sequence[a:b]]
-			if TICK_PENDING in subList:
-				istr += " "
-			elif TICK_RUNNING in subList:
+			if TICK_RUNNING in subList:
 				istr += ">"
+			elif TICK_PENDING in subList:
+				istr += " "
 			elif TICK_FAILED in subList:
 				istr += "!"
 			elif TICK_SKIPPED in subList:
