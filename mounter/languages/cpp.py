@@ -11,9 +11,6 @@ from mounter.goal import *
 from mounter.operation import *
 
 class CppGroup():
-	def __init__(self, workspace : Workspace) -> None:
-		self.ws : Final[Workspace] = workspace
-	
 	async def getIncludes(self) -> FrozenSet[Path]:
 		return frozenset()
 	
@@ -51,8 +48,7 @@ class CppGroup():
 		return id(self)
 
 class InputCppGroup(CppGroup):
-	def __init__(self, workspace : Workspace) -> None:
-		super().__init__(workspace)
+	def __init__(self) -> None:
 		self.includes = set()
 		self.objects = set()
 		self.staticLibraries = set()
@@ -92,8 +88,7 @@ class InputCppGroup(CppGroup):
 		return Gather(*[c(mainGroup) for c in self.compileEventListeners])
 
 class AggregatorCppGroup(CppGroup):
-	def __init__(self, workspace : Workspace, dependencies : Dict[CppGroup,bool] = ()) -> None:
-		super().__init__(workspace)
+	def __init__(self, dependencies : Dict[CppGroup,bool] = ()) -> None:
 		self._dependencies : Dict[CppGroup,bool] = dict(dependencies)
 
 	@op
@@ -150,8 +145,9 @@ class ClangCppGroup(AggregatorCppGroup):
 			sources : AsyncIterable[Path] = None,
 			outputName : str = None,
 			) -> None:
-		super().__init__(clangModule.ws,dependencies)
-		self.cpp = clangModule
+		super().__init__(dependencies)
+		self.cpp : Final[ClangModule] = clangModule
+		self.ws : Final[Workspace] = clangModule.ws
 		self.__rootDirectory = rootDirectory
 		self.__objDirectory = objDirectory
 		self.__binDirectory = binDirectory
@@ -491,10 +487,10 @@ class CppProject(Module,SupportsCppGroup):
 			self._dir = Path(projectFile).getAncestor()
 		else:
 			self._dir = None
-		self.group = InputCppGroup(self.ws)
+		self.group = InputCppGroup()
 		self.group.compileEventListeners.append(self.onCompile)
 		self.rootDirectory = ...
-		self.privateGroup = InputCppGroup(self.ws)
+		self.privateGroup = InputCppGroup()
 		self.compilationUnits : Set[Path] = set()
 		self.mains : Set[Path | str] = set()
 		self.__mainPaths : Set[Path] = set()
