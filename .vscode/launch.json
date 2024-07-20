@@ -9,6 +9,13 @@
 			"justMyCode": true
 		},
 		{
+			"name": "Python: Debug mounter",
+			"type": "python",
+			"request": "launch",
+			"module": "mounter",
+			"args": ["tests.cpp.hello.project","main.exe"]
+		},
+		{
 			"name": "LLDB: Attach debugger",
 			"type": "lldb",
 			"request": "attach",

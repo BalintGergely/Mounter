@@ -37,7 +37,7 @@ class CppGroup():
 		Called simultaneously as the specified group is being compiled.
 		Useful to perform indirectly related tasks.
 		"""
-		return instant()
+		return Instant()
 	
 	def compile() -> Awaitable:
 		raise Exception("Not a compilable CppGroup!")
@@ -64,32 +64,32 @@ class InputCppGroup(CppGroup):
 	@override
 	@once
 	def getIncludes(self):
-		return instant(frozenset(self.includes))
+		return Instant(frozenset(self.includes))
 	
 	@override
 	@once
 	def getObjects(self):
-		return instant(frozenset(self.objects))
+		return Instant(frozenset(self.objects))
 	
 	@override
 	@once
 	def getStaticLibraries(self):
-		return instant(frozenset(self.staticLibraries))
+		return Instant(frozenset(self.staticLibraries))
 	
 	@override
 	@once
 	def getDynamicLibraries(self):
-		return instant(frozenset(self.dynamicLibraries))
+		return Instant(frozenset(self.dynamicLibraries))
 
 	@override
 	@once		
 	def getCompileFlags(self) -> FrozenSet[str]:
-		return instant(frozenset(self.compileFlags))
+		return Instant(frozenset(self.compileFlags))
 
 	@override
 	@once
 	def onCompile(self, mainGroup : 'CppGroup'):
-		return self.ws[AsyncOps].gather(*[c(mainGroup) for c in self.compileEventListeners])
+		return Gather(*[c(mainGroup) for c in self.compileEventListeners])
 
 class AggregatorCppGroup(CppGroup):
 	def __init__(self, workspace : Workspace, dependencies : Dict[CppGroup,bool] = ()) -> None:
@@ -133,7 +133,7 @@ class AggregatorCppGroup(CppGroup):
 
 	@once
 	def onCompile(self, mainGroup: CppGroup):
-		return self.ws[AsyncOps].gather(*[g.onCompile(mainGroup) for g in self._dependencies.keys()])
+		return Gather(*[g.onCompile(mainGroup) for g in self._dependencies.keys()])
 
 class ClangCppGroup(AggregatorCppGroup):
 	def __init__(self,
@@ -178,6 +178,16 @@ class ClangCppGroup(AggregatorCppGroup):
 	async def getBinDirectory(self) -> Path:
 		self.__binDirectory.opCreateDirectories()
 		return self.__binDirectory
+	
+	async def __runCommandHandleResult(self, commandSeq, progressUnit):
+		(rc, a, b) = await self.ws[AsyncOps].runCommand(commandSeq, progressUnit = progressUnit)
+		if b != b'' or rc != 0:
+			print(f"Error: {subprocess.list2cmdline(commandSeq)}")
+			print(b.decode(),end="")
+		if rc != 0:
+			print(f"Process exited with code {rc}")
+			raise Exception("Clang command fail")
+		return a == b'' and b == b''
 
 	@op
 	async def __preprocess(self, sourceFile : Path) -> Path:
@@ -190,7 +200,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				.relativeTo(self.__rootDirectory) \
 				.moveTo(self.__srcDirectory) \
 				.withExtension("cpp")
-			includes,args = await self.ws[AsyncOps].gather(
+			includes,args = await Gather(
 				self._getMyIncludes(),
 				self.__getAdditionalArguments()
 			)
@@ -200,11 +210,11 @@ class ClangCppGroup(AggregatorCppGroup):
 			deltaChecker = self.ws[FileDeltaChecker]
 
 			dependencyHash = []
-			await RED_LIGHT
+			await self.ws[AsyncOps].redLight()
 			dependencyHash.append(deltaChecker.query(sourceFile))
 
 			for i in sorted(includes):
-				await RED_LIGHT
+				await self.ws[AsyncOps].redLight()
 				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**")))
 			
 			cmd = ["clang++",sourceFile,"-CC","--preprocess","-o",outputFile]
@@ -216,7 +226,6 @@ class ClangCppGroup(AggregatorCppGroup):
 			cmd = [str(c) for c in cmd]
 
 			pu.setName(list2cmdline(cmd))
-			pu.setRunning()
 
 			data = self.ws[FileManagement].lock(outputFile, self)
 			if data.get("dependencyHash",None) != dependencyHash \
@@ -227,8 +236,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				outputFile.getAncestor().opCreateDirectories()
 				stable = False
 				try:
-					(a, b) = await self.ws[AsyncOps].runCommand(cmd)
-					stable = (a == b'' and b == b'')
+					stable = await self.__runCommandHandleResult(cmd, pu)
 				finally:
 					data["args"] = args
 					data["stable"] = stable
@@ -244,7 +252,7 @@ class ClangCppGroup(AggregatorCppGroup):
 		Returns after the operation is done, with the Path of the object file.
 		"""
 		with self.ws[Progress].register() as pu:
-			preFile,args = await self.ws[AsyncOps].gather(
+			preFile,args = await Gather(
 				self.__preprocess(sourceFile),
 				self.__getAdditionalArguments())
 			
@@ -268,7 +276,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				.withExtension(extension)
 
 			dependencyHash = []
-			await RED_LIGHT
+			await self.ws[AsyncOps].redLight()
 			dependencyHash.append(deltaChecker.query(preFile))
 
 			cmd = ["clang++",preFile,"-o",outputFile]
@@ -290,7 +298,6 @@ class ClangCppGroup(AggregatorCppGroup):
 			cmd = [str(c) for c in cmd]
 
 			pu.setName(list2cmdline(cmd))
-			pu.setRunning()
 			data = self.ws[FileManagement].lock(outputFile, self)
 
 			if self.__debug and not data.get("debug",None) \
@@ -303,8 +310,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				outputFile.getAncestor().opCreateDirectories()
 				stable = False
 				try:
-					(a, b) = await self.ws[AsyncOps].runCommand(cmd)
-					stable = (a == b'' and b == b'')
+					stable = await self.__runCommandHandleResult(cmd, pu)
 				finally:
 					if self.__debug:
 						data["debug"] = True
@@ -338,7 +344,7 @@ class ClangCppGroup(AggregatorCppGroup):
 		with self.ws[Progress].register() as pu:
 			deltaChecker = self.ws[FileDeltaChecker]
 
-			(binDirectory,staticLibraries,allObjects,args) = await self.ws[AsyncOps].gather(
+			(binDirectory,staticLibraries,allObjects,args) = await Gather(
 				self.getBinDirectory(),
 				self._getMyStaticLibraries(),
 				self.getObjects(),
@@ -351,11 +357,11 @@ class ClangCppGroup(AggregatorCppGroup):
 			isMain = outputFile.hasExtension("exe")
 			dependencyHash = []
 			for o in sorted(allObjects):
-				await RED_LIGHT
+				await self.ws[AsyncOps].redLight()
 				dependencyHash.append(deltaChecker.query(o))
 			dependencyHash.append(None)
 			for l in sorted(staticLibraries):
-				await RED_LIGHT
+				await self.ws[AsyncOps].redLight()
 				dependencyHash.append(deltaChecker.query(l))
 				
 			cmd = ["clang++","-o",outputFile] + list(allObjects)
@@ -378,7 +384,6 @@ class ClangCppGroup(AggregatorCppGroup):
 			cmd = [str(c) for c in cmd]
 
 			pu.setName(list2cmdline(cmd))
-			pu.setRunning()
 			data = self.ws[FileManagement].lock(outputFile, self)
 			
 			if self.__debug and not data.get("debug",None) \
@@ -391,8 +396,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				outputFile.getAncestor().opCreateDirectories()
 				stable = False
 				try:
-					(a, b) = await self.ws[AsyncOps].runCommand(cmd)
-					stable = (a == b'' and b == b'')
+					stable = await self.__runCommandHandleResult(cmd, pu)
 				finally:
 					if self.__debug:
 						data["debug"] = True
@@ -408,13 +412,13 @@ class ClangCppGroup(AggregatorCppGroup):
 	
 	@op
 	async def copyDlls(self):
-		(dllSet,binDirectory) = await self.ws[AsyncOps].gather(self._getMyDynamicLibraries(),self.getBinDirectory())
+		(dllSet,binDirectory) = await Gather(self._getMyDynamicLibraries(),self.getBinDirectory())
 		tasks = [self.ws[FileManagement].copyFile(l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet]
-		await self.ws[AsyncOps].gather(*tasks)
+		await Gather(*tasks)
 	
 	@once
 	def compile(self):
-		return self.ws[AsyncOps].gather(self.link(),self.copyDlls(),self.onCompile(self))
+		return Gather(self.link(),self.copyDlls(),self.onCompile(self))
 
 class CppModule(Module):
 	def __init__(self, context) -> None:
