@@ -1,5 +1,6 @@
 
 from subprocess import list2cmdline
+import re
 from typing import Coroutine, Set, List, FrozenSet, override, AsyncIterable, Awaitable
 from mounter.operation.files import *
 from mounter.path import *
@@ -9,6 +10,83 @@ from mounter.persistence import *
 from mounter.progress import *
 from mounter.goal import *
 from mounter.operation import *
+
+CPP_STRING_LITERAL = re.compile((
+	r"(?P<kind>L|u8|u|U)?" # Literal kind
+	r"(?P<raw>R)?" # Whether it is raw
+	r"\"(?(raw)(?P<delim>[^() \\]*)\()" # Prefix
+	r"(?P<sequence>(?(raw).|(?:[^\\\"]|\\.))*?)" # Sequence
+	r"(?(raw)\)(?P=delim))\"" # Suffix
+),flags = re.DOTALL)
+
+CPP_STRING_ESCAPE = re.compile((
+	rb"\\("
+	rb"(?P<control>[abfnrtv])"
+	rb"|(?P<o>o{)?(?P<octal>(?(o)[0-7]+|[0-7]{1,3}))(?(o)})"
+	rb"|x(?P<xopen>{)?(?P<hex>[0-9a-fA-F]+)(?(xopen)})"
+	rb"|(?:(?P<uopen>u{)|(?P<u>u)|(?P<U>U))"
+		rb"(?P<unicode>(?(uopen)[0-9a-fA-F]+)(?(u)[0-9a-fA-F]{4})(?(U)[0-9a-fA-F]{8}))"
+		rb"(?(uopen)})"
+	rb"|N{(?P<name>.+?)}"
+	rb"|(?P<char>.))"
+),flags = re.DOTALL)
+
+CPP_LINE_MARKER = re.compile(fr"^#\s+(?P<line>\d+)\s+{CPP_STRING_LITERAL.pattern}")
+
+def cppEscapeSubstitution(m : re.Match[bytes]):
+	# These DO come up in clang-generated preprocessed files...
+	control = m["control"]
+	octal = m["octal"]
+	hex = m["hex"]
+	unicode = m["unicode"]
+	name = m["name"]
+	char = m["char"]
+	if control:
+		return {
+			b"a":b"\a",
+			b"b":b"\b",
+			b"f":b"\f",
+			b"n":b"\n",
+			b"r":b"\r",
+			b"t":b"\t",
+			b"v":b"\v"
+			}[control]
+	if octal:
+		return bytes([int(octal,8)])
+	if hex:
+		return bytes([int(octal,16)])
+	if unicode:
+		return chr(int(hex,16)).encode()
+	if name:
+		return str(eval(f"\"\\N{{{name}}}\"")).encode()
+	if char:
+		return char
+	raise Exception(f"Unrecognised escape sequence: {m.group()}")
+
+def getLiteralContent(m : re.Match):
+	sequence : str = m["sequence"]
+	if m["raw"]:
+		return sequence
+	else:
+		try:
+			return CPP_STRING_ESCAPE.sub(cppEscapeSubstitution, sequence.encode()).decode()
+		except Exception as exc:
+			raise Exception(f"Error parsing {m.group()}: {exc.args}")
+
+
+CPP_NOT_A_SOURCE = re.compile(r"<.*>")
+def readIncludes(path : Path):
+	includePaths = set()
+	with path.open("r",encoding = "utf-8") as input:
+		for line in input:
+			lineMarkerMatch = CPP_LINE_MARKER.match(line)
+			if lineMarkerMatch is None:
+				continue
+			pathLiteral = getLiteralContent(lineMarkerMatch)
+			if CPP_NOT_A_SOURCE.fullmatch(pathLiteral):
+				continue
+			includePaths.add(Path(pathLiteral))
+	return includePaths
 
 class CppGroup():
 	async def getIncludes(self) -> FrozenSet[Path]:
@@ -211,7 +289,10 @@ class ClangCppGroup(AggregatorCppGroup):
 
 			for i in sorted(includes):
 				await self.ws[AsyncOps].redLight()
-				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**")))
+				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**/")))
+			
+			data = self.ws[FileManagement].lock(outputFile, self)
+			includeHash = data.get("includeHash",())
 			
 			cmd = ["clang++",sourceFile,"-CC","--preprocess","-o",outputFile]
 			cmd.append("-finput-charset=UTF-8")
@@ -223,20 +304,26 @@ class ClangCppGroup(AggregatorCppGroup):
 
 			pu.setName(list2cmdline(cmd))
 
-			data = self.ws[FileManagement].lock(outputFile, self)
 			if data.get("dependencyHash",None) != dependencyHash \
 			or data.get("args",None) != args \
 			or not data.get("stable",None) \
+			or not all(deltaChecker.test(v) for v in includeHash) \
 			or not outputFile.isPresent():
 				data.clear()				
 				outputFile.getAncestor().opCreateDirectories()
 				stable = False
 				try:
-					stable = await self.__runCommandHandleResult(cmd, pu)
+					st = await self.__runCommandHandleResult(cmd, pu)
+					includeHash = []
+					for path in readIncludes(outputFile):
+						if any(i.isSubpath(path) for i in includes):
+							includeHash.append(deltaChecker.query(path))
+					stable = st
 				finally:
 					data["args"] = args
 					data["stable"] = stable
 					data["dependencyHash"] = dependencyHash
+					data["includeHash"] = includeHash
 			else:
 				pu.setUpToDate()
 			return outputFile

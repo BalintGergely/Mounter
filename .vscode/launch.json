@@ -13,7 +13,7 @@
 			"type": "python",
 			"request": "launch",
 			"module": "mounter",
-			"args": ["tests.cpp.hello.project","main.exe"]
+			"args": ["tests.cpp.multi.project","main.exe"]
 		},
 		{
 			"name": "LLDB: Attach debugger",

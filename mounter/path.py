@@ -2,7 +2,7 @@ import pathlib
 import shutil
 import re
 import os
-from typing import Hashable, Final, List, Tuple, Self
+from typing import Hashable, Final, List, Tuple, Self, TextIO, BinaryIO, overload, Iterable
 
 class Path(Hashable):
 	"""
@@ -74,7 +74,9 @@ class Path(Hashable):
 			return Path(barePath+"."+ext)
 	
 	def isSubpath(self,other: 'Path') -> bool:
-		return str(self).startswith(str(other))
+		subpath = str(other)
+		mypath = str(self)
+		return subpath.startswith(mypath) and (len(subpath) == len(mypath) or subpath[len(mypath)] == '/')
 	
 	def relativeTo(self,other: 'Path') -> 'RelativePath':
 		return RelativePath(self,self.__p.relative_to(other.__p))
@@ -213,7 +215,7 @@ class Path(Hashable):
 	def getContentLength(self):
 		return os.path.getsize(self.__p)
 	
-	def open(self,flags,encoding : str = None):
+	def open(self,flags,encoding : str = None) -> TextIO | BinaryIO:
 		f = set()
 		if encoding is None:
 			f.add("b")
@@ -255,6 +257,59 @@ class RelativePath(Path):
 	def __repr__(self):
 		return f"RelativePath({repr(str(self))},{repr(self._subpath)})"
 
+__section = re.compile(
+	 r"(?P<seplongstarepi>/\*{2,}$)"
+	r"|(?P<seplongstarsep>/(?:\*{2,}/)+)"
+	r"|(?P<sep>/)"
+	r"|(?P<ques>\?)"
+	r"|(?P<longstarsep>\*{2,}/)"
+	r"|(?P<longstarepi>\*{2,}$)"
+	r"|(?P<longstar>\*{2,})"
+	r"|(?P<star>\*)"
+	r"|(?P<char>[-_ a-zA-Z0-9]+)"
+	r"|(?P<misc>.)"
+)
+
+def _compilePattern(pathstr):
+	preRegex = ""
+	postRegex = ""
+	groupCount = 0
+	hitEndOnMatch = False
+	for match in __section.finditer(pathstr):
+		if match["sep"]:
+			preRegex = preRegex + r"(/"
+			postRegex = r")?" + postRegex
+			groupCount += 1
+		if match["seplongstarsep"]:
+			preRegex = preRegex + r"(?:(?=/).*?(/"
+			postRegex = r")?)?" + postRegex
+			groupCount += 1
+			hitEndOnMatch = True
+		if match["seplongstarepi"]: # 
+			preRegex = preRegex + r"(?:/.*)?"
+			hitEndOnMatch = True
+		if match["ques"]:
+			preRegex = preRegex + r"[^/]"
+		if match["longstarepi"]:
+			preRegex = preRegex + r".*"
+			hitEndOnMatch = True
+		if match["longstarsep"]:
+			preRegex = preRegex + r".*?(/"
+			postRegex = r")?" + postRegex
+			groupCount += 1
+			hitEndOnMatch = True
+		if match["longstar"]:
+			preRegex = preRegex + r".*?("
+			postRegex = r")?" + postRegex
+			groupCount += 1
+		if match["star"]:
+			preRegex = preRegex + r"[^/]*?"
+		if match["char"]:
+			preRegex = preRegex + match["char"]
+		if match["misc"]:
+			preRegex = preRegex + "\\" + match["misc"]
+	return (re.compile(preRegex + postRegex),groupCount,hitEndOnMatch)
+
 class PathSet(Hashable):
 	"""
 	Represents a set of Paths, defined by a pattern.
@@ -263,33 +318,16 @@ class PathSet(Hashable):
 
 	# I had the idea to base this off of either regex or glob patterns,
 	# but both use special characters that can occur in path names.
-
-	__section = re.compile(r"(\?)|(\*)|([a-zA-Z0-9 ])|(.)")
-
-	def __compileSingleElement(elem : str):
-		assert type(elem) == str
-		assert elem != ""
-		if elem == "**":
-			return None
-		match : re.Match
-		outRegex = ""
-		for match in PathSet.__section.finditer(elem):
-			if match.group(1) is not None:
-				outRegex += "."
-			if match.group(2) is not None:
-				outRegex += ".*"
-			if match.group(3) is not None:
-				outRegex += match.group(3)
-			if match.group(4) is not None:
-				outRegex += "\\" + match.group(4)
-		return re.compile(outRegex)
-
-	__core = re.compile(r"(/?.*?)?((?=[^/]*[*?]).*?)?(/)?")
+	
+	__core = re.compile(r"(/?.*?)?((?=[^/]*[*?]).*?)?(/?)")
 
 	__root : Path | None
 	__pattern : str
-	__compiled : Tuple[str]
+	__compiled : re.Pattern
+	__fullGroup : int
+	__hitEndOnMatch : int
 	__directoryOnly : bool
+	__singleton : bool
 
 	def __new__(cls, pattern : 'str | Path | PathSet'):
 		if type(pattern) is PathSet:
@@ -306,67 +344,33 @@ class PathSet(Hashable):
 		(pattern,det,ndet,dir) = PathSet.__core.fullmatch(pattern).group(0,1,2,3)
 		self.__compiled = ()
 		self.__root = None
+		self.__singleton = not bool(ndet)
 		if det:
-			endSlash = "/" if dir else ""
 			self.__root = Path(det)
 			if ndet:
-				pattern = f"{self.__root}/{ndet}{endSlash}"
+				pattern = f"{self.__root}/{ndet}"
 			else:
-				pattern = f"{self.__root}{endSlash}"
-		if ndet:
-			self.__compiled = tuple(PathSet.__compileSingleElement(k) for k in ndet.split("/"))
-		self.__pattern = pattern
-		self.__directoryOnly = bool(dir)
+				pattern = f"{self.__root}"
+		elif ndet:
+			pattern = ndet
+		(self.__compiled,self.__fullGroup,self.__hitEndOnMatch) = _compilePattern(pattern)
+		self.__pattern = pattern + dir
+		self.__directoryOnly = dir == "/"
 		return self
 	
-	def __partialMatch(pattern : List[re.Pattern | None], elems : List[str]) -> Tuple[bool,bool]:
-		"""
-		First return value: Whether the pattern matched
-		Second return value: Whether the end of input was hit
-		"""
-		if pattern == (None,):
-			return (True,False)
-		if len(elems) == 0:
-			return (len(pattern) == 0,True)
-		if len(pattern) == 0:
-			return (False,False)
-		if pattern[0] is None:
-			(a,ah) = PathSet.__partialMatch(pattern[1:], elems)
-			if a: 
-				return (a,ah)
-			(b,bh) = PathSet.__partialMatch(pattern, elems[1:])
-			return (b,bh or ah)
-		if pattern[0].fullmatch(elems[0]):
-			return PathSet.__partialMatch(pattern[1:], elems[1:])
-		return (False,False)
-
 	def __fullMatch(self,path : Path):
-		ps = str(path)
-		splitSeq = None
-		if self.__root is None:
-			splitSeq = ps.split("/")
+		m = self.__compiled.fullmatch(str(path))
+		if m:
+			lastGroup = m.group(self.__fullGroup)
+			pm = (lastGroup is not None) and (not self.__directoryOnly or path.isDirectory())
+			if lastGroup is None:
+				he = True # Partial match.
+			else:
+				he = self.__hitEndOnMatch
 		else:
-			rs = str(self.__root)
-			if len(ps) < len(rs):
-				if rs.startswith(ps) and ps[len(rs)] == "/":
-					return (False,True)
-				else:
-					return (False,False)
-			if len(ps) == len(rs):
-				if ps == rs:
-					splitSeq = ()
-				else:
-					return (False,False)
-			if len(ps) > len(rs):
-				if ps.startswith(rs) and ps[len(rs)] == "/":
-					splitSeq = ps[len(rs) + 1:].split("/")
-				else:
-					return (False,False)
-		(pm,he) = PathSet.__partialMatch(self.__compiled, splitSeq)
-		if pm and self.__directoryOnly and not path.isDirectory():
-			return (False,he)
-		else:
-			return (pm,he)
+			pm = False
+			he = False
+		return (pm,he)
 	
 	def findAll(self, path = ..., includePath = True, deterministic = False):
 		"""
@@ -380,10 +384,13 @@ class PathSet(Hashable):
 		(pm,he) = self.__fullMatch(path)
 		
 		if pm and not he:
-			yield from path.getPreorder(includeSelf = includePath, deterministic = deterministic)
+			for p in path.getPreorder(includeSelf = includePath, deterministic = deterministic):
+				if not self.__directoryOnly or p.isDirectory():
+					yield p
 			return
 		if pm and includePath:
-			yield path
+			if not self.__directoryOnly or path.isDirectory():
+				yield path
 		if he and path.isDirectory():
 			for p in path.getChildren(deterministic = deterministic):
 				yield from self.findAll(path = p, includePath = True, deterministic = deterministic)
@@ -395,7 +402,7 @@ class PathSet(Hashable):
 		"""
 		True if this PathSet can only ever match one path.
 		"""
-		return self.__compiled == ()
+		return self.__singleton
 
 	def getRoot(self):
 		assert self.__root is not None
