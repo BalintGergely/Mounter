@@ -258,11 +258,10 @@ class RelativePath(Path):
 		return f"RelativePath({repr(str(self))},{repr(self._subpath)})"
 
 __section = re.compile(
-	 r"(?P<seplongstarepi>/\*{2,}$)"
-	r"|(?P<seplongstarsep>/(?:\*{2,}/)+)"
+	 r"(?P<seplongstarepi>(?:/\*{2,})+$)"
+	r"|(?P<seplongstarsep>(?:/\*{2,})+/)"
 	r"|(?P<sep>/)"
 	r"|(?P<ques>\?)"
-	r"|(?P<longstarsep>\*{2,}/)"
 	r"|(?P<longstarepi>\*{2,}$)"
 	r"|(?P<longstar>\*{2,})"
 	r"|(?P<star>\*)"
@@ -277,36 +276,40 @@ def _compilePattern(pathstr):
 	hitEndOnMatch = False
 	for match in __section.finditer(pathstr):
 		if match["sep"]:
+			#  / : Match a path separator
 			preRegex = preRegex + r"(/"
 			postRegex = r")?" + postRegex
 			groupCount += 1
+		if match["ques"]:
+			#  ? : Match any non-separator character.
+			preRegex = preRegex + r"[^/]"
+		if match["star"]:
+			#  * : Match any sequence that does not contain a seperator.
+			preRegex = preRegex + r"[^/]*?"
+		if match["longstarepi"]:
+			# Trailing ** : Match any possible suffix.
+			preRegex = preRegex + r".*"
+			hitEndOnMatch = True
+		if match["longstar"]:
+			#  ** : Match any sequence.
+			preRegex = preRegex + r".*?("
+			postRegex = r")?" + postRegex
+			groupCount += 1
 		if match["seplongstarsep"]:
+			# /**/ special case: Also matches one separator.
 			preRegex = preRegex + r"(?:(?=/).*?(/"
 			postRegex = r")?)?" + postRegex
 			groupCount += 1
 			hitEndOnMatch = True
-		if match["seplongstarepi"]: # 
+		if match["seplongstarepi"]:
+			# /**  special case: Also matches empty.
 			preRegex = preRegex + r"(?:/.*)?"
 			hitEndOnMatch = True
-		if match["ques"]:
-			preRegex = preRegex + r"[^/]"
-		if match["longstarepi"]:
-			preRegex = preRegex + r".*"
-			hitEndOnMatch = True
-		if match["longstarsep"]:
-			preRegex = preRegex + r".*?(/"
-			postRegex = r")?" + postRegex
-			groupCount += 1
-			hitEndOnMatch = True
-		if match["longstar"]:
-			preRegex = preRegex + r".*?("
-			postRegex = r")?" + postRegex
-			groupCount += 1
-		if match["star"]:
-			preRegex = preRegex + r"[^/]*?"
 		if match["char"]:
+			# c : Match a specific character.
 			preRegex = preRegex + match["char"]
 		if match["misc"]:
+			# m : Match a specific character.
 			preRegex = preRegex + "\\" + match["misc"]
 	return (re.compile(preRegex + postRegex),groupCount,hitEndOnMatch)
 
