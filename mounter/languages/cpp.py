@@ -10,6 +10,7 @@ from mounter.persistence import *
 from mounter.progress import *
 from mounter.goal import *
 from mounter.operation import *
+from mounter.operation.completion import Instant, Task
 
 CPP_STRING_LITERAL = re.compile((
 	r"(?P<kind>L|u8|u|U)?" # Literal kind
@@ -284,12 +285,12 @@ class ClangCppGroup(AggregatorCppGroup):
 			deltaChecker = self.ws[FileDeltaChecker]
 
 			dependencyHash = []
-			await self.ws[AsyncOps].redLight()
-			dependencyHash.append(deltaChecker.query(sourceFile))
+			dependencyHash.append(Task(deltaChecker.query(sourceFile)))
 
 			for i in sorted(includes):
-				await self.ws[AsyncOps].redLight()
-				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**/")))
+				dependencyHash.append(Task(deltaChecker.query(PathSet(f"{i}/**/"))))
+			
+			dependencyHash = [await d for d in dependencyHash]
 			
 			data = self.ws[FileManagement].lock(outputFile, self)
 			includeHash = data.get("includeHash",())
@@ -307,7 +308,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			if data.get("dependencyHash",None) != dependencyHash \
 			or data.get("args",None) != args \
 			or not data.get("stable",None) \
-			or not all(deltaChecker.test(v) for v in includeHash) \
+			or not all([await k for k in [Task(deltaChecker.test(v)) for v in includeHash]]) \
 			or not outputFile.isPresent():
 				data.clear()				
 				outputFile.getAncestor().opCreateDirectories()
@@ -317,13 +318,13 @@ class ClangCppGroup(AggregatorCppGroup):
 					includeHash = []
 					for path in readIncludes(outputFile):
 						if any(i.isSubpath(path) for i in includes):
-							includeHash.append(deltaChecker.query(path))
+							includeHash.append(Task(deltaChecker.query(path)))
 					stable = st
 				finally:
 					data["args"] = args
 					data["stable"] = stable
 					data["dependencyHash"] = dependencyHash
-					data["includeHash"] = includeHash
+					data["includeHash"] = [await k for k in includeHash]
 			else:
 				pu.setUpToDate()
 			return outputFile
@@ -358,9 +359,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				.moveTo(self.__objDirectory) \
 				.withExtension(extension)
 
-			dependencyHash = []
-			await self.ws[AsyncOps].redLight()
-			dependencyHash.append(deltaChecker.query(preFile))
+			dependencyHash = [await deltaChecker.query(preFile)]
 
 			cmd = ["clang++",preFile,"-o",outputFile]
 			cmd.append("-finput-charset=UTF-8")
@@ -440,12 +439,12 @@ class ClangCppGroup(AggregatorCppGroup):
 			isMain = outputFile.hasExtension("exe")
 			dependencyHash = []
 			for o in sorted(allObjects):
-				await self.ws[AsyncOps].redLight()
-				dependencyHash.append(deltaChecker.query(o))
-			dependencyHash.append(None)
+				dependencyHash.append(Task(deltaChecker.query(o)))
+			dependencyHash.append(Instant(None))
 			for l in sorted(staticLibraries):
-				await self.ws[AsyncOps].redLight()
-				dependencyHash.append(deltaChecker.query(l))
+				dependencyHash.append(Task(deltaChecker.query(l)))
+			
+			dependencyHash = [await k for k in dependencyHash]
 				
 			cmd = ["clang++","-o",outputFile] + list(allObjects)
 			cmd.append("-finput-charset=UTF-8")
@@ -514,19 +513,6 @@ class CppModule(Module):
 		self.objDirectory = self.rootDirectory.subpath("obj/cpp")
 		self.binDirectory = self.rootDirectory.subpath("bin")
 		self.srcDirectory = self.objDirectory
-
-	@op
-	async def copyDll(self, sourcePath : Path, targetPath : Path):
-		with self.ws[Progress].register() as pu:
-			pu.setName(f"Copy {sourcePath} to {targetPath}")
-			deltaChecker = self.ws[FileDeltaChecker]
-			data = self.getFileProperties(targetPath)
-			if deltaChecker.query(sourcePath) != data.get("sourceHash") \
-			or not targetPath.isPresent():
-				pu.setRunning()
-				sourcePath.opCopyTo(targetPath)
-			else:
-				pu.setUpToDate()
 	
 	def makeGroup(self,*,
 			dependencies : Dict[CppGroup,bool] = ...,

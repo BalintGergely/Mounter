@@ -5,7 +5,7 @@
 			"name": "Python: Attach debugger",
 			"type": "debugpy",
 			"request": "attach",
-			"processId":"${command:pickProcess}",
+			"processId": "${command:pickProcess}",
 			"justMyCode": true
 		},
 		{
@@ -13,7 +13,10 @@
 			"type": "python",
 			"request": "launch",
 			"module": "mounter",
-			"args": ["tests.cpp.multi.project","main.exe"]
+			"args": [
+				"tests.cpp.multi.project",
+				"main.exe"
+			]
 		},
 		{
 			"name": "LLDB: Attach debugger",
@@ -25,7 +28,7 @@
 			"name": "Java: Attach debugger",
 			"type": "java",
 			"request": "attach",
-			"processId":"${command:PickJavaProcess}"
+			"processId": "${command:PickJavaProcess}"
 		}
 	]
 }

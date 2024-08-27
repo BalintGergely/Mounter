@@ -1,15 +1,15 @@
 
 import asyncio
+import concurrent.futures
 import subprocess
 import functools
-from typing import TypeVar, TypeVarTuple, Tuple, Generic, Awaitable, Callable, Type, Iterator, Coroutine, List, overload
-from mounter.path import Path
-from mounter.workspace import Module, ModuleInitContext, Workspace
-from mounter.progress import Progress, ProgressUnit
-from mounter.persistence import Persistence
-from mounter.delta import FileDeltaChecker
+import concurrent
+from typing import TypeVarTuple, Tuple, Awaitable, Callable, Type
+from mounter.workspace import Module
+from mounter.progress import ProgressUnit
 from mounter.operation.completion import *
 
+A = TypeVar("A")
 T = TypeVarTuple("T")
 
 class AsyncOps(Module):
@@ -23,18 +23,18 @@ class AsyncOps(Module):
 	def __init__(self, context) -> None:
 		super().__init__(context)
 		self.__runner = asyncio.Runner()
+		self.__runnerDelayer = None
 		self.__maxParallelCommands = None
 		self.__commandCount = 0
 		self.__commandQueue = QueueDelayer()
-		self.__redLight = None
+		self.__threadPool = concurrent.futures.ThreadPoolExecutor()
 	
 	def disableAsync(self):
 		self.__maxParallelCommands = 1
 	
 	def run(self):
 		with self.__runner:
-			if self.__redLight is None:
-				self.__redLight = AsyncDelayer(self.__runner.get_loop())
+			self.__runnerDelayer = AsyncDelayer(self.__runner.get_loop())
 			self._downstream()
 
 	def __getLoop(self):
@@ -57,9 +57,6 @@ class AsyncOps(Module):
 		loop = self.__getLoop()
 		delay.then(lambda x:loop.stop())
 		loop.run_forever()
-	
-	def redLight(self) -> Awaitable:
-		return self.__redLight
 	
 	def completeNow(self,coro : Awaitable[A]) -> A:
 		"""
@@ -101,6 +98,21 @@ class AsyncOps(Module):
 			self.__exitCommand()
 		
 		return (rc, stdout, stderr)
+	
+	def callInBackground(self, command : Callable[[],A]) -> CompletionFuture[A]:
+		unsafeCompletable = CompletableFuture()
+		safeCompletable = unsafeCompletable.withDelay(self.__runnerDelayer)
+
+		# Global interpreter lock has funny behaviour where the current thread
+		# is immediately halted when a new thread is created.
+		# Therefore it is best if we delay submission using our async loop first.
+
+		def doSubmit():
+			self.__threadPool.submit(functools.partial(unsafeCompletable.callAndSetResult,command))
+		
+		self.__getLoop().call_soon(doSubmit)
+
+		return safeCompletable
 
 def manifest() -> Type[AsyncOps]:
 	return AsyncOps

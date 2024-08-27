@@ -25,11 +25,8 @@ class Path(Hashable):
 	def __hash__(self):
 		return self.__p.__hash__()
 	
-	def _eqdc(self):
-		return Path
-	
 	def __eq__(self,other):
-		return isinstance(other,Path) and self._eqdc() == other._eqdc() and self.__p == other.__p
+		return isinstance(other,Path) and self.__p == other.__p
 	
 	def __lt__(self,other):
 		return str(self) < str(other)
@@ -284,7 +281,7 @@ def _compilePattern(pathstr):
 			#  ? : Match any non-separator character.
 			preRegex = preRegex + r"[^/]"
 		if match["star"]:
-			#  * : Match any sequence that does not contain a seperator.
+			#  * : Match any sequence that does not contain a separator.
 			preRegex = preRegex + r"[^/]*?"
 		if match["longstarepi"]:
 			# Trailing ** : Match any possible suffix.

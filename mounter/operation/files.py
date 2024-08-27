@@ -1,5 +1,6 @@
 
 from typing import Set, Dict
+from functools import partial
 from mounter.operation.core import *
 from mounter.path import Path
 from mounter.persistence import Persistence, persistenceTypeId
@@ -39,18 +40,20 @@ class FileManagement(Module):
 		if key not in store:
 			store[key] = dict()
 		return store[key]
+
+	def __doCopy(sourcePath : Path, targetPath : Path):
+		sourcePath.opCopyTo(targetPath)
 	
 	@op
 	async def copyFile(self, sourcePath : Path, targetPath : Path):
 		with self.ws[Progress].register() as pu:
 			pu.setName(f"Copy {sourcePath} to {targetPath}")
-			sourceHash = self.ws[FileDeltaChecker].query(sourcePath)
+			sourceHash = await self.ws[FileDeltaChecker].query(sourcePath)
 			data = self.lock(targetPath,self)
 			if sourceHash != data.get("sourceHash",None) \
 			or not targetPath.isPresent():
-				await self.ws[AsyncOps].redLight()
 				pu.setRunning()
-				sourcePath.opCopyTo(targetPath)
+				await self.ws[AsyncOps].callInBackground(partial(FileManagement.__doCopy,sourcePath,targetPath))
 				data["sourceHash"] = sourceHash
 			else:
 				pu.setUpToDate()

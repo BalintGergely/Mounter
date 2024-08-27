@@ -9,12 +9,16 @@ C = TypeVar('C')
 D = TypeVar('D')
 T = TypeVarTuple('T')
 
-def mustForwardException(exc : BaseException):
-	return isinstance(exc, SystemExit | KeyboardInterrupt)
+def absorbException(exc : BaseException):
+	if isinstance(exc,BaseExceptionGroup):
+		for x in exc.exceptions:
+			absorbException(x)
+	if isinstance(exc, SystemExit | KeyboardInterrupt):
+		raise exc
 
 class Future(Generic[A]):
 	"""
-	A placeholder for the outcome of an asynchronous opeartion.
+	A placeholder for the outcome of an asynchronous operation.
 	Waiting for the outcome is not always supported.
 	"""
 	__result : Tuple[bool,A | BaseException] | None
@@ -29,7 +33,14 @@ class Future(Generic[A]):
 	def _setException(self,exceptionValue):
 		self.__result = (True,exceptionValue)
 	
+	def _copyFrom(self, source : 'Future[A]'):
+		assert source.done()
+		self.__result = source.__result
+
 	def done(self):
+		"""
+		Returns True if this future has the result ready. False otherwise.
+		"""
 		return self.__result is not None
 		
 	def result(self) -> A:
@@ -70,8 +81,20 @@ class Delayer():
 
 	This is the base class of awaitables in this module.
 	"""
-	def then(self,proc : Callable):
+	def then(self,proc : Callable[[Self], None]):
+		"""
+		Invokes the procedure at some unspecified time in the future.
+		The procedure's only argument will be this Delayer.
+
+		May invoke immediately.
+		"""
 		raise Exception("Not implemented!")
+	
+	def thenCall(self,proc : Callable[[*T], None],*args : *T,**kwargs):
+		"""
+		Alternative to 'then' where proc receives the specified arguments.
+		"""
+		self.then(lambda _: proc(*args,**kwargs))
 	
 	def __await__(self):
 		yield self
@@ -79,8 +102,51 @@ class Delayer():
 	def __iter__(self):
 		return (yield from self.__await__())
 
+class LoopDelayer(Delayer):
+	"""
+	A LoopDelayer hosts a mini event loop to help mitigate excessive
+	stack consumption.
+	
+	The first task that is added runs immediately. While it is running,
+	further tasks are added to a queue.
+
+	When the first task completes, a new task is taken from the queue until
+	all tasks are processed.
+
+	The 'then' method returns immediately when recursively invoked.
+	Otherwise it processes tasks until the queue is empty.
+	"""
+	__queue : List[Callable[[Self],None]]
+	__loopRunning : bool
+	def __new__(cls) -> Self:
+		self = super().__new__(cls)
+		self.__queue = []
+		self.__loopRunning = False
+		return self
+	
+	def then(self, proc: Callable[[Self], Any]):
+		self.__queue.append(proc)
+		
+		if self.__loopRunning:
+			return
+		
+		self.__loopRunning = True
+		try:
+			exceptions = []
+			while len(self.__queue) != 0:
+				proc = self.__queue.pop()
+				try:
+					proc(self)
+				except BaseException as exc:
+					exceptions.append(exc)
+		finally:
+			self.__loopRunning = False
+		
+		if len(exceptions) != 0:
+			raise ExceptionGroup("",exceptions)
+
 class QueueDelayer(Delayer):
-	__queue : List[Callable]
+	__queue : List[Callable[[Self],None]]
 	def __new__(cls) -> Self:
 		self = super().__new__(cls)
 		self.__queue = []
@@ -133,7 +199,10 @@ class Completion(Delayer):
 				exceptions.append(exc)
 		self.__queue = None
 		if len(exceptions) != 0:
-			raise BaseExceptionGroup("",exceptions)
+			raise ExceptionGroup("",exceptions = exceptions)
+	
+	def done(self):
+		return self.__queue is None
 	
 	@override
 	def then(self,proc : Callable):
@@ -146,18 +215,24 @@ class Completion(Delayer):
 		if self.__queue != None:
 			yield self
 
-class NoDelayer(Completion):
+class Completed(Completion):
 	"""
-	A delayer with no delay. Callbacks are immediately invoked.
+	A Completion that is completed with None as it's value.
 	"""
+	__instance : 'Completed | None' = None
 	def __new__(cls) -> Self:
-		self = super().__new__(cls)
-		self._complete()
-		return self
+		if cls is not Completed:
+			self = super().__new__(cls)
+			self._complete()
+			return self
+		if Completed.__instance is None:
+			Completed.__instance = super().__new__(cls)
+			Completed.__instance._complete()
+		return Completed.__instance
 
 class CompletionFuture(Future[A],Completion):
 	"""
-	Combination of Future, and Completion. Awaiting additionally returns the result, or raises the exception.
+	Combination of Future and Completion. Awaiting additionally returns the result, or raises the exception.
 	"""
 	@override
 	def _setResult(self, resultValue):
@@ -170,6 +245,11 @@ class CompletionFuture(Future[A],Completion):
 		super()._complete()
 	
 	@override
+	def _copyFrom(self, source : 'Future[A]'):
+		super()._copyFrom(source)
+		super()._complete()
+	
+	@override
 	def _complete(self):
 		raise Exception("_complete may not be called directly on CompletionFuture.")
 
@@ -177,6 +257,18 @@ class CompletionFuture(Future[A],Completion):
 	def __await__(self):
 		yield from super().__await__()
 		return self.result()
+		
+	def withDelay(self,delayer : Delayer) -> 'CompletionFuture[A]':
+		"""
+		Returns a new completion, that is completed after this completion is completed
+		with the specified additional delay. The delay is applied even if this completion
+		has already completed. The result of the new completion is the same as this.
+		"""
+		newCompletion = CompletionFuture()
+
+		self.then(functools.partial(delayer.thenCall,newCompletion._copyFrom))
+
+		return newCompletion
 
 	def toAsyncioFuture(self, loop : asyncio.AbstractEventLoop | None = None):
 		"""
@@ -185,7 +277,7 @@ class CompletionFuture(Future[A],Completion):
 		if loop is None:
 			loop = asyncio.get_event_loop()
 		future = loop.create_future()
-		self.then(functools.partial(self.copyToAsyncioFuture,future))
+		self.thenCall(functools.partial(self.copyToAsyncioFuture,future))
 		return future
 
 class CompletableFuture(CompletionFuture):
@@ -197,6 +289,15 @@ class CompletableFuture(CompletionFuture):
 	
 	def setException(self, exceptionValue):
 		return self._setException(exceptionValue)
+	
+	def callAndSetResult(self, proc : Callable[[*T],A], *args : *T, **kwargs):
+		try:
+			result = proc(*args,**kwargs)
+		except BaseException as exc:
+			self.setException(exc)
+			absorbException(exc)
+		else:
+			self.setResult(result)
 
 class Instant(CompletionFuture):
 	def __new__(cls, result = None, exception = None) -> Self:
@@ -207,20 +308,21 @@ class Instant(CompletionFuture):
 			self._setResult(result)
 		return self
 
+async def __wrapAwaitable(awaitable : Awaitable[A]) -> A:
+	return await awaitable
+
 class Task(CompletionFuture[A]):
 	"""
 	Performs an await operation and returns the result.
 	"""
-	async def __wrapAwaitable(awaitable : Awaitable[A]) -> A:
-		return await awaitable
 
 	__coro : Coroutine[Delayer,None,A]
-	def __new__(cls, coro : Awaitable[A]) -> Self:
+	def __new__(cls, coro : Awaitable[A]) -> Self | Completion:
 		if isinstance(coro,Completion):
 			return coro
 		if not isinstance(coro,Coroutine):
 			# Generic Delayer is also wrapped.
-			coro = Task.__wrapAwaitable(coro)
+			coro = __wrapAwaitable(coro)
 		self = super().__new__(cls)
 		self.__coro = coro
 		self._advance(None)
@@ -234,11 +336,42 @@ class Task(CompletionFuture[A]):
 		except BaseException as exc:
 			try:
 				self._setException(exc)
-			finally:
-				if mustForwardException(exc):
-					raise exc
+			except BaseException as bexc:
+				raise ExceptionGroup("",[exc,bexc])
+			absorbException(exc)
 		else:
 			result.then(self._advance)
+
+def aggressiveTask(coro : Awaitable[A]):
+	"""
+	The awaitable is awaited synchronously. Any attempt at waiting for an
+	async awaitable inside will result in an exception being raised.
+	"""
+	if isinstance(coro,Completion):
+		if not coro.done():
+			raise BaseException("Cannot await incomplete completion inside aggressive task.")
+	if isinstance(coro,Delayer):
+		raise BaseException("Cannot await non-completion Delayer inside aggressive task.")
+	if not isinstance(coro,Coroutine):
+		coro = __wrapAwaitable(coro)
+	toThrow = None
+	while True:		
+		try:
+			if toThrow is None:
+				result = coro.send(None)
+			else:
+				result = coro.throw(toThrow)
+		except StopIteration as exc:
+			return exc.value
+		except BaseException as exc:
+			raise
+		else:
+			try:
+				aggressiveTask(result)
+			except BaseException as exc:
+				toThrow = exc
+			else:
+				toThrow = None
 
 class AsyncDelayer(Delayer):
 	"""
@@ -254,7 +387,7 @@ class AsyncDelayer(Delayer):
 		return self
 	
 	def then(self,proc : Callable):
-		self.__loop.call_soon(proc, self)
+		self.__loop.call_soon_threadsafe(proc, self)
 
 class AsyncTask(CompletionFuture[A]):
 	"""
@@ -273,6 +406,10 @@ class AsyncTask(CompletionFuture[A]):
 			self._setResult(future.result())
 		else:
 			self._setException(exc)
+
+def gather(*completions : Awaitable):
+	
+	pass
 
 class Gather(Generic[*T],CompletionFuture[Tuple[*T]]):
 	__completions : List[CompletionFuture]
@@ -322,3 +459,60 @@ class Gather(Generic[*T],CompletionFuture[Tuple[*T]]):
 		else:
 			self.__remaining = 0
 			self._setException(exc)
+
+#class Lock(Delayer):
+#	"""
+#	An async implementation of a concurrent lock.
+#
+#	This is useful when async code must be limited to one
+#	execution at a time, while still allowing it to
+#	await asyncio operations.
+#
+#	Very niche for objects that can async change.
+#	"""
+#	__locked : bool
+#	__inUnlockLoop : bool
+#	__queue : List[Callable[[]]]
+#
+#	def __new__(cls) -> Self:
+#		self = super().__new__(cls)
+#		self.__locked = False
+#		self.__inUnlockLoop = False
+#		self.__queue = []
+#		return self
+#	
+#	def then(self, proc: Callable[[Self], Any]):
+#		if self.__locked:
+#			self.__queue.append(proc)
+#		else:
+#			proc(self)
+#	
+#	def isLocked(self):
+#		return self.__locked
+#	
+#	def __await__(self):
+#		while self.__locked:
+#			yield self
+#	
+#	def __enter__(self):
+#		assert not self.__locked
+#		self.__locked = True
+#		return self
+#	
+#	def __exit__(self, exct, excc, excs):
+#		assert self.__locked
+#		self.__locked = False
+#		if not self.__inUnlockLoop:
+#			self.__inUnlockLoop = True
+#			exceptions = []
+#			try:
+#				while not self.__locked and len(self.__queue) != 0:
+#					t = self.__queue.pop(0)
+#					try:
+#						t(self)
+#					except BaseException as exc:
+#						exceptions.append(exc)
+#			finally:
+#				self.__inUnlockLoop = False
+#			if len(exceptions) != 0:
+#				raise ExceptionGroup("",exceptions)
