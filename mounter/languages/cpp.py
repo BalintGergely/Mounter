@@ -355,6 +355,16 @@ class ClangCppGroup(AggregatorCppGroup):
 				else:
 					extension = "o"
 			
+			flags = ""
+			if self.__optimalize:
+				flags = flags + "o"
+			
+			if self.__debug:
+				flags = flags + "d"
+			
+			if flags != "":
+				extension = f"{flags}.{extension}"
+			
 			outputFile = preFile.relativeTo(self.__srcDirectory) \
 				.moveTo(self.__objDirectory) \
 				.withExtension(extension)
