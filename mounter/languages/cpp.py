@@ -404,10 +404,8 @@ class ClangCppGroup(AggregatorCppGroup):
 				try:
 					stable = await self.__runCommandHandleResult(cmd, pu)
 				finally:
-					if self.__debug:
-						data["debug"] = True
-					if self.__optimalize:
-						data["optimalize"] = True
+					data["debug"] = self.__debug
+					data["optimalize"] = self.__optimalize
 					data["args"] = args
 					data["stable"] = stable
 					data["dependencyHash"] = dependencyHash
@@ -478,10 +476,10 @@ class ClangCppGroup(AggregatorCppGroup):
 			pu.setName(list2cmdline(cmd))
 			data = self.ws[FileManagement].lock(outputFile, self)
 			
-			if self.__debug and not data.get("debug",None) \
+			if data.get("debug",False) != self.__debug \
 			or data.get("args",None) != args \
 			or data.get("optimalize",False) != self.__optimalize \
-			or not data.get("stable",None) \
+			or not data.get("stable",False) \
 			or data.get("dependencyHash",None) != dependencyHash \
 			or not outputFile.isPresent():
 				
@@ -490,10 +488,8 @@ class ClangCppGroup(AggregatorCppGroup):
 				try:
 					stable = await self.__runCommandHandleResult(cmd, pu)
 				finally:
-					if self.__debug:
-						data["debug"] = True
-					if self.__optimalize:
-						data["optimalize"] = True
+					data["debug"] = self.__debug
+					data["optimalize"] = self.__optimalize
 					data["args"] = args
 					data["stable"] = stable
 					data["dependencyHash"] = dependencyHash
