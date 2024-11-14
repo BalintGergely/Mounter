@@ -72,8 +72,8 @@ def getLiteralContent(m : re.Match):
 		try:
 			return CPP_STRING_ESCAPE.sub(cppEscapeSubstitution, sequence.encode()).decode()
 		except Exception as exc:
+			absorbException(exc)
 			raise Exception(f"Error parsing {m.group()}: {exc.args}")
-
 
 CPP_NOT_A_SOURCE = re.compile(r"<.*>")
 def readIncludes(path : Path):
@@ -127,14 +127,21 @@ class CppGroup():
 		return id(self)
 
 class InputCppGroup(CppGroup):
-	def __init__(self) -> None:
-		self.includes = set()
-		self.objects = set()
-		self.staticLibraries = set()
-		self.dynamicLibraries = set()
-		self.compileFlags = set()
-		self.compileEventListeners = []
-		self.onLinkCallback = None
+	def __init__(self,
+			includes = (),
+			objects = (),
+			staticLibraries = (),
+			dynamicLibraries = (),
+			compileFlags = (),
+			compileEventListeners = (),
+			onLinkCallback = None) -> None:
+		self.includes : Set[Path] = set(includes)
+		self.objects : Set[Path] = set(objects)
+		self.staticLibraries : Set[Path] = set(staticLibraries)
+		self.dynamicLibraries : Set[Path] = set(dynamicLibraries)
+		self.compileFlags : Set[str] = set(compileFlags)
+		self.compileEventListeners : List[Callable] = list(compileEventListeners)
+		self.onLinkCallback = onLinkCallback
 	
 	@override
 	@once
