@@ -10,11 +10,31 @@ D = TypeVar('D')
 T = TypeVarTuple('T')
 
 def absorbException(exc : BaseException):
+	"""
+	If the argument reports SystemExit or KeyboardInterrupt, the corresponding exception is raised.
+	"""
 	if isinstance(exc,BaseExceptionGroup):
 		for x in exc.exceptions:
 			absorbException(x)
 	if isinstance(exc, SystemExit | KeyboardInterrupt):
 		raise exc
+
+def isInterrupt(exc : BaseException):
+	"""
+	Tests whether the exception is being caused by an event that occurred
+	out of scope.
+	"""
+	if isinstance(exc,BaseExceptionGroup):
+		for x in exc.exceptions:
+			if not isInterrupt(x):
+				return False
+	return not isinstance(exc, SystemExit | KeyboardInterrupt | CancelledException)
+
+class BaseCompletionException(Exception):
+	pass
+
+class CancelledException(BaseCompletionException):
+	pass
 
 class Future(Generic[A]):
 	"""
@@ -71,7 +91,7 @@ class Future(Generic[A]):
 		if doRaise:
 			future.set_exception(what)
 		else:
-			future.set_result(what)	
+			future.set_result(what)
 
 class Delayer():
 	"""
@@ -143,7 +163,9 @@ class LoopDelayer(Delayer):
 			self.__loopRunning = False
 		
 		if len(exceptions) != 0:
-			raise ExceptionGroup("",exceptions)
+			for e in exceptions:
+				absorbException(e)
+			raise ExceptionGroup("",exceptions = exceptions)
 
 class QueueDelayer(Delayer):
 	__queue : List[Callable[[Self],None]]
@@ -197,8 +219,9 @@ class Completion(Delayer):
 				a(self)
 			except BaseException as exc:
 				exceptions.append(exc)
-		self.__queue = None
 		if len(exceptions) != 0:
+			for k in exceptions:
+				absorbException(k)
 			raise ExceptionGroup("",exceptions = exceptions)
 	
 	def done(self):
@@ -308,7 +331,7 @@ class Instant(CompletionFuture):
 			self._setResult(result)
 		return self
 
-async def __wrapAwaitable(awaitable : Awaitable[A]) -> A:
+async def _wrapAwaitable(awaitable : Awaitable[A]) -> A:
 	return await awaitable
 
 class Task(CompletionFuture[A]):
@@ -317,12 +340,12 @@ class Task(CompletionFuture[A]):
 	"""
 
 	__coro : Coroutine[Delayer,None,A]
-	def __new__(cls, coro : Awaitable[A]) -> Self | Completion:
-		if isinstance(coro,Completion):
+	def __new__(cls, coro : Awaitable[A]) -> CompletionFuture:
+		if isinstance(coro,CompletionFuture):
 			return coro
 		if not isinstance(coro,Coroutine):
 			# Generic Delayer is also wrapped.
-			coro = __wrapAwaitable(coro)
+			coro = _wrapAwaitable(coro)
 		self = super().__new__(cls)
 		self.__coro = coro
 		self._advance(None)
@@ -337,6 +360,8 @@ class Task(CompletionFuture[A]):
 			try:
 				self._setException(exc)
 			except BaseException as bexc:
+				absorbException(exc)
+				absorbException(bexc)
 				raise ExceptionGroup("",[exc,bexc])
 			absorbException(exc)
 		else:
@@ -353,7 +378,7 @@ def aggressiveTask(coro : Awaitable[A]):
 	if isinstance(coro,Delayer):
 		raise BaseException("Cannot await non-completion Delayer inside aggressive task.")
 	if not isinstance(coro,Coroutine):
-		coro = __wrapAwaitable(coro)
+		coro = _wrapAwaitable(coro)
 	toThrow = None
 	while True:		
 		try:
@@ -389,6 +414,18 @@ class AsyncDelayer(Delayer):
 	def then(self,proc : Callable):
 		self.__loop.call_soon_threadsafe(proc, self)
 
+class AsyncCompletion(Completion):
+	"""
+	A Completion that is immediately scheduled to be completed in the specified async event loop.
+	This provides the same scheduling as AsyncTask, except without a result.
+	"""
+	def __new__(cls, loop : asyncio.AbstractEventLoop | None = None) -> Self:
+		self = super().__new__(cls)
+		if loop is None:
+			loop = asyncio.get_event_loop()
+		loop.call_soon_threadsafe(self._complete)
+		return self
+
 class AsyncTask(CompletionFuture[A]):
 	"""
 	Wraps an asyncio awaitable in a CompletionFuture. If it is not a future,
@@ -401,18 +438,18 @@ class AsyncTask(CompletionFuture[A]):
 		return self
 	
 	def __completeFromFuture(self, future : asyncio.Future[A]):
-		exc = future.exception()
-		if exc is None:
-			self._setResult(future.result())
+		if future.cancelled():
+			self._setException(CancelledException())
 		else:
-			self._setException(exc)
-
-def gather(*completions : Awaitable):
-	
-	pass
+			exc = future.exception()
+			if exc is None:
+				self._setResult(future.result())
+			else:
+				self._setException(exc)
 
 class Gather(Generic[*T],CompletionFuture[Tuple[*T]]):
 	__completions : List[CompletionFuture]
+	__failFast : bool
 	@overload
 	def __new__(cls, a : Awaitable[A], /) -> 'Gather[A]': ...
 	@overload
@@ -421,44 +458,74 @@ class Gather(Generic[*T],CompletionFuture[Tuple[*T]]):
 	def __new__(cls, a : Awaitable[A], b : Awaitable[B], c : Awaitable[C], /) -> 'Gather[A,B,C]': ...
 	@overload
 	def __new__(cls, a : Awaitable[A], b : Awaitable[B], c : Awaitable[C], d : Awaitable[D], /) -> 'Gather[A,B,C,D]': ...
-	def __new__(cls, *completions : CompletionFuture | Coroutine) -> Self:
+	def __new__(cls, *completions : CompletionFuture | Coroutine, failFast : bool = True) -> Self:
 		self = super().__new__(cls)
 		if len(completions) == 0:
 			self._setResult(())
 			return self
 		
 		self.__completions = []
+		self.__failFast = failFast
 		exception = None
+		doRaise = False
 
 		for c in completions:
 			if exception is not None:
 				if isinstance(c, Coroutine):
 					c.close()
 			else:
-				t = Task(c)
-				self.__completions.append(t)
-				if t.done():
-					exception = t.exception()
+				try:
+					t = Task(c)
+				except BaseException as ex:
+					# This may be an interrupt!
+					exception = ex
+					doRaise = True
+				else:
+					self.__completions.append(t)
+					if failFast and t.done():
+						exception = t.exception()
+		
+		if doRaise:
+			raise exception
 		
 		if exception is not None:
+			absorbException(exception)
 			self._setException(exception)
 		else:
 			self.__remaining = len(self.__completions)
 			for c in self.__completions:
 				c.then(self.__advance)
+		
 		return self
 	
 	def __advance(self, completion : CompletionFuture):
 		if self.__remaining == 0:
 			return
-		exc = completion.exception()
-		if exc is None:
-			self.__remaining -= 1
-			if self.__remaining == 0:
-				self._setResult(tuple(c.result() for c in self.__completions))
-		else:
+
+		if self.__failFast and completion.exception() is not None:
 			self.__remaining = 0
-			self._setException(exc)
+			self._setException(completion.exception())
+			return
+				
+		self.__remaining -= 1
+
+		if self.__remaining == 0:
+
+			exceptionList = []
+			resultList = []
+			
+			for c in self.__completions:
+				if c.exception() is not None:
+					exceptionList.append(c.exception())
+				else:
+					resultList.append(c.result())
+			
+			if len(exceptionList) == 1:
+				self._setException(exceptionList[0])
+			elif len(exceptionList) != 0:
+				self._setException(ExceptionGroup("",exceptions=exceptionList))
+			else:
+				self._setResult(tuple(resultList))
 
 #class Lock(Delayer):
 #	"""

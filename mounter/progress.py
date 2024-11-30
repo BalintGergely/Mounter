@@ -2,6 +2,7 @@
 import shutil
 import itertools
 from typing import List
+from mounter.operation.completion import isInterrupt
 from mounter.workspace import *
 from mounter.workspace import Workspace
 
@@ -11,6 +12,7 @@ TICK_SKIPPED = 2
 TICK_UP_TO_DATE = 3
 TICK_DONE = 4
 TICK_FAILED = 5
+TICK_STOPPED = 6
 NAME_SET = 6
 
 def _divy(tickCount,maxTicks):
@@ -46,8 +48,6 @@ class ProgressUnit():
 	def getSortKey(self):
 		if self.__state == TICK_PENDING:
 			return 10
-		if self.__state == TICK_RUNNING:
-			return 9
 		return 0
 
 	def getState(self):
@@ -63,11 +63,14 @@ class ProgressUnit():
 			if self.__state is TICK_RUNNING:
 				self.__state = TICK_DONE
 				self.__r(self, TICK_DONE)
-		else:
-			if self.__state is TICK_PENDING:
-				self.__state = TICK_SKIPPED
-				self.__r(self, TICK_SKIPPED)
-			elif self.__state is TICK_RUNNING:
+		elif self.__state is TICK_PENDING:
+			self.__state = TICK_SKIPPED
+			self.__r(self, TICK_SKIPPED)
+		elif self.__state is TICK_RUNNING:
+			if isInterrupt(excc):
+				self.__state = TICK_STOPPED
+				self.__r(self, TICK_STOPPED)
+			else:
 				self.__state = TICK_FAILED
 				self.__r(self, TICK_FAILED)
 
@@ -116,6 +119,8 @@ class Progress(Module):
 			subList = [p.getState() for p in self.__sequence[a:b]]
 			if TICK_RUNNING in subList:
 				istr += ">"
+			elif TICK_STOPPED in subList:
+				istr += "/"
 			elif TICK_PENDING in subList:
 				istr += " "
 			elif TICK_FAILED in subList:
@@ -141,7 +146,7 @@ class Progress(Module):
 			unit._pid = self.__counter
 		if changeType == NAME_SET:
 			return
-		if not self.verbose and changeType != TICK_FAILED:
+		if changeType == TICK_STOPPED or (not self.verbose and changeType != TICK_FAILED):
 			self.__printNonVerbose()
 			return
 		(bar,per) = self.__generateProgressString()
@@ -170,6 +175,7 @@ class Progress(Module):
 			(TICK_UP_TO_DATE,"up to date"),
 			(TICK_FAILED,"failed"),
 			(TICK_SKIPPED,"skipped"),
+			(TICK_STOPPED,"stopped")
 		]
 		reports = []
 		for (t,n) in nameList:

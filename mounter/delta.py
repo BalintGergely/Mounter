@@ -42,7 +42,7 @@ class PathCheckObject():
 		self.subpaths = ()
 		with self.path.open("r") as input:
 			while True:
-				buf = input.read(0x1000)
+				buf = input.read(0x100000)
 				if len(buf) == 0:
 					break
 				dig.update(buf)
@@ -205,9 +205,9 @@ class FileDeltaChecker(Module):
 		ch = self.lookupCheckerByPath(path)
 		return ch.getVersion()
 	
-	def test(self, version : int):
+	async def test(self, version : int):
 		checker = self.__idmap.get(version,None)
-		return checker is not None and checker.testVersion(version)
+		return checker is not None and await checker.testVersion(version)
 
 	def clear(self, path: PathLike):
 		path = self.__sanitizeQuery(path)

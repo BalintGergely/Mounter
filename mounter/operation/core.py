@@ -6,7 +6,6 @@ import functools
 import concurrent
 from typing import TypeVarTuple, Tuple, Awaitable, Callable, Type
 from mounter.workspace import Module
-from mounter.progress import ProgressUnit
 from mounter.operation.completion import *
 
 A = TypeVar("A")
@@ -27,6 +26,8 @@ class AsyncOps(Module):
 		self.__maxParallelCommands = None
 		self.__commandCount = 0
 		self.__commandQueue = QueueDelayer()
+		self.__laterQueue : List[Completion] | None = None
+		self.__currentRedLight = None
 		self.__threadPool = concurrent.futures.ThreadPoolExecutor()
 	
 	def disableAsync(self):
@@ -65,15 +66,45 @@ class AsyncOps(Module):
 		task = Task(coro)
 		self.__runLoopUntil(task)
 		return task.result()
+
+	def __drainLaterQueue(self):
+		while len(self.__laterQueue) != 0:
+			x = self.__laterQueue.pop(0)
+			if not x.done():
+				self.__runLoopUntil(x)
+		self.__laterQueue = None
 	
 	def completeLater(self,task : Awaitable[A]) -> Awaitable[A]:
 		"""
 		Schedules the awaitable to be completed after all modules are loaded.
 		"""
-		task = Task(task)
-		self.ws.append(lambda: self.completeNow(task))
+		if self.__laterQueue is None:
+			self.__laterQueue = [Task(task)]
+			self.ws.append(self.__drainLaterQueue)
+		else:
+			self.__laterQueue.append(Task(task))
+	
+	def redLight(self) -> Awaitable:
+		"""
+		Yields async execution.
 		
-	async def runCommand(self, command, input = bytes(), *, progressUnit : ProgressUnit = None) -> Tuple[int, bytes, bytes]:
+		It is recommended to wait on this before the first time an operation
+		runs heavy computation, but only after dependent operations have been dispatched.
+		"""
+		if self.__maxParallelCommands == 1:
+			return Completed()
+		
+		# It is best if the red lights are bunched together.
+		# They commonly preceede subprocess calls, which we would like to
+		# start as soon as possible, preferrably sooner than any task
+		# on the pooled threads, which slow down everything due to GIL.
+		
+		if self.__currentRedLight is None or self.__currentRedLight.done():
+			self.__currentRedLight = AsyncCompletion(self.__getLoop())
+
+		return self.__currentRedLight
+	
+	async def runCommand(self, command, input = bytes(), *, progressUnit = None) -> Tuple[int, bytes, bytes]:
 		"""
 		Runs the specified command. If specified, the progressUnit is
 		set to running before the command is actually started.
@@ -100,6 +131,11 @@ class AsyncOps(Module):
 		return (rc, stdout, stderr)
 	
 	def callInBackground(self, command : Callable[[],A]) -> CompletionFuture[A]:
+		"""
+		Submits the specified callable to be executed on a background (Python) thread asynchronously.
+		
+		A CompletionFuture is returned representing the future result of the call.
+		"""
 		unsafeCompletable = CompletableFuture()
 		safeCompletable = unsafeCompletable.withDelay(self.__runnerDelayer)
 
@@ -139,8 +175,7 @@ def once(fun : Callable[[*T],A]) -> Callable[[*T],A]:
 
 def task(coro : Callable[[*T],Awaitable[A]]) -> Callable[[*T],Awaitable[A]]:
 	"""
-	The decorated coroutine is wrapped in an AsyncOps task.
-	AsyncOps instance is obtained through the "ws" member of self.
+	The decorated coroutine is wrapped in a completion Task.
 	Watch out for hanging tasks!
 	"""
 	@functools.wraps(coro)
@@ -149,4 +184,8 @@ def task(coro : Callable[[*T],Awaitable[A]]) -> Callable[[*T],Awaitable[A]]:
 	return wrapper
 
 def op(arg):
+	"""
+	A composition of the once and task decorators.
+	The decorated async method is ran asynchronously once per unique set of arguments.
+	"""
 	return once(task(arg))

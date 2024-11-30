@@ -72,41 +72,48 @@ def getLiteralContent(m : re.Match):
 		try:
 			return CPP_STRING_ESCAPE.sub(cppEscapeSubstitution, sequence.encode()).decode()
 		except Exception as exc:
-			absorbException(exc)
 			raise Exception(f"Error parsing {m.group()}: {exc.args}")
 
 CPP_NOT_A_SOURCE = re.compile(r"<.*>")
+
 def readIncludes(path : Path):
 	includePaths = set()
 	with path.open("r",encoding = "utf-8") as input:
-		for line in input:
-			lineMarkerMatch = CPP_LINE_MARKER.match(line)
-			if lineMarkerMatch is None:
-				continue
-			pathLiteral = getLiteralContent(lineMarkerMatch)
-			if CPP_NOT_A_SOURCE.fullmatch(pathLiteral):
-				continue
-			includePaths.add(Path(pathLiteral))
+		data = ""
+		lastMatch = 0
+		while True:
+			nd = input.read(0x100000)
+			if len(nd) == 0:
+				break
+
+			data = data[lastMatch:] + nd
+			lastMatch = 0
+			for lineMarkerMatch in CPP_LINE_MARKER.finditer(data):
+				lastMatch = lineMarkerMatch.start()
+				pathLiteral = getLiteralContent(lineMarkerMatch)
+				if not CPP_NOT_A_SOURCE.fullmatch(pathLiteral):
+					includePaths.add(Path(pathLiteral))
+	
 	return includePaths
 
 class CppGroup():
-	async def getIncludes(self) -> FrozenSet[Path]:
-		return frozenset()
+	def getIncludes(self) -> FrozenSet[Path]:
+		return Instant(frozenset())
 	
-	async def getObjects(self) -> FrozenSet[Path]:
-		return frozenset()
+	def getObjects(self) -> FrozenSet[Path]:
+		return Instant(frozenset())
 	
-	async def getStaticLibraries(self) -> FrozenSet[Path]:
-		return frozenset()
+	def getStaticLibraries(self) -> FrozenSet[Path]:
+		return Instant(frozenset())
 	
-	async def getDynamicLibraries(self) -> FrozenSet[Path]:
-		return frozenset()
+	def getDynamicLibraries(self) -> FrozenSet[Path]:
+		return Instant(frozenset())
 	
-	async def getBinDirectory(self) -> Path:
+	def getBinDirectory(self) -> Path:
 		raise Exception("Not supported")
 	
-	async def getCompileFlags(self) -> FrozenSet[str]:
-		return frozenset()
+	def getCompileFlags(self) -> FrozenSet[str]:
+		return Instant(frozenset())
 
 	def onCompile(self, mainGroup : 'CppGroup'):
 		"""
@@ -282,9 +289,10 @@ class ClangCppGroup(AggregatorCppGroup):
 				.relativeTo(self.__rootDirectory) \
 				.moveTo(self.__srcDirectory) \
 				.withExtension("cpp")
-			includes,args = await Gather(
+			includes,args,_ = await Gather(
 				self._getMyIncludes(),
-				self.__getAdditionalArguments()
+				self.__getAdditionalArguments(),
+				self.ws[AsyncOps].redLight()
 			)
 
 			args = sorted(args)
@@ -318,20 +326,27 @@ class ClangCppGroup(AggregatorCppGroup):
 			or not all([await k for k in [Task(deltaChecker.test(v)) for v in includeHash]]) \
 			or not outputFile.isPresent():
 				data.clear()				
-				outputFile.getAncestor().opCreateDirectories()
-				stable = False
-				try:
-					st = await self.__runCommandHandleResult(cmd, pu)
+				data["args"] = args
+				data["dependencyHash"] = dependencyHash
+				st = False
+				
+				async def finalizeData():
+					nonlocal outputFile
+					nonlocal self
+					nonlocal includes
+					nonlocal data
+					nonlocal st
 					includeHash = []
-					for path in readIncludes(outputFile):
+					ipset = await self.ws[AsyncOps].callInBackground(functools.partial(readIncludes, outputFile))
+					for path in ipset:
 						if any(i.isSubpath(path) for i in includes):
 							includeHash.append(Task(deltaChecker.query(path)))
-					stable = st
-				finally:
-					data["args"] = args
-					data["stable"] = stable
-					data["dependencyHash"] = dependencyHash
 					data["includeHash"] = [await k for k in includeHash]
+					data["stable"] = st
+
+				outputFile.getAncestor().opCreateDirectories()
+				st = await self.__runCommandHandleResult(cmd, pu)
+				self.ws[AsyncOps].completeLater(finalizeData())
 			else:
 				pu.setUpToDate()
 			return outputFile
@@ -343,9 +358,11 @@ class ClangCppGroup(AggregatorCppGroup):
 		Returns after the operation is done, with the Path of the object file.
 		"""
 		with self.ws[Progress].register() as pu:
-			preFile,args = await Gather(
+			preFile,args,_ = await Gather(
 				self.__preprocess(sourceFile),
-				self.__getAdditionalArguments())
+				self.__getAdditionalArguments(),
+				self.ws[AsyncOps].redLight()
+			)
 			
 			args = sorted(args)
 
@@ -441,11 +458,12 @@ class ClangCppGroup(AggregatorCppGroup):
 		with self.ws[Progress].register() as pu:
 			deltaChecker = self.ws[FileDeltaChecker]
 
-			(binDirectory,staticLibraries,allObjects,args) = await Gather(
+			(binDirectory,staticLibraries,allObjects,args,_) = await Gather(
 				self.getBinDirectory(),
 				self._getMyStaticLibraries(),
 				self.getObjects(),
-				self.__getAdditionalArguments()
+				self.__getAdditionalArguments(),
+				self.ws[AsyncOps].redLight()
 			)
 			
 			args = sorted(args)
@@ -509,6 +527,7 @@ class ClangCppGroup(AggregatorCppGroup):
 	async def copyDlls(self):
 		(dllSet,binDirectory) = await Gather(self._getMyDynamicLibraries(),self.getBinDirectory())
 		tasks = [self.ws[FileManagement].copyFile(l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet]
+		await self.ws[AsyncOps].redLight()
 		await Gather(*tasks)
 	
 	@once

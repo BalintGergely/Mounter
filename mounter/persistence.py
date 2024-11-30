@@ -49,7 +49,7 @@ class Persistence(Module):
 	
 	def _savePersistenceFile(self):
 		assert self._root is not None
-		s = json.dumps(self._root,indent='\t',ensure_ascii = False,sort_keys = True)
+		s = json.dumps(self._root,ensure_ascii = False,sort_keys = True,separators=(',', ':'))
 		with self._file.open("w",encoding="utf-8") as output:
 			output.write(s)
 		self._root = None

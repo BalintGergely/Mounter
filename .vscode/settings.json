@@ -1,3 +1,4 @@
 {
-	"editor.indentSize": "tabSize"
+	"editor.indentSize": "tabSize",
+	"terminal.integrated.enablePersistentSessions": false
 }
