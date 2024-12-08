@@ -32,7 +32,7 @@ CPP_STRING_ESCAPE = re.compile((
 	rb"|(?P<char>.))"
 ),flags = re.DOTALL)
 
-CPP_LINE_MARKER = re.compile(fr"^#\s+(?P<line>\d+)\s+{CPP_STRING_LITERAL.pattern}")
+CPP_LINE_MARKER = re.compile(fr"^#\s+(?P<line>\d+)\s+{CPP_STRING_LITERAL.pattern}", re.DOTALL | re.MULTILINE)
 
 def cppEscapeSubstitution(m : re.Match[bytes]):
 	# These DO come up in clang-generated preprocessed files...
@@ -78,6 +78,7 @@ CPP_NOT_A_SOURCE = re.compile(r"<.*>")
 
 def readIncludes(path : Path):
 	includePaths = set()
+	
 	with path.open("r",encoding = "utf-8") as input:
 		data = ""
 		lastMatch = 0
@@ -94,7 +95,7 @@ def readIncludes(path : Path):
 				if not CPP_NOT_A_SOURCE.fullmatch(pathLiteral):
 					includePaths.add(Path(pathLiteral))
 	
-	return includePaths
+	return frozenset(includePaths)
 
 class CppGroup():
 	def getIncludes(self) -> FrozenSet[Path]:
