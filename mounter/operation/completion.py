@@ -1,3 +1,21 @@
+"""
+Support for coroutines in mounter.
+
+Python asyncio assumes everything is awaited at some point,
+and every operation converges into the completion of a single "main" coroutine.
+
+The API implemented by this module instead assume that everything
+is completed eventually. And by eventually, we mean that there is
+always an overarching context of asynchronous execution
+such that by the time the context is closed, every completion
+belonging to that context is done.
+
+Therefore, nothing needs awaiting, except actual Coroutines
+that still assume an awaiter.
+
+One example of such context of asynchronous execution is implemented
+by AsyncOps, which manages a context in the form of a Workspace module.
+"""
 
 from typing import *
 import asyncio
@@ -7,7 +25,20 @@ A = TypeVar('A')
 B = TypeVar('B')
 C = TypeVar('C')
 D = TypeVar('D')
+E = TypeVar('E')
+P = ParamSpec('P')
 T = TypeVarTuple('T')
+
+class BaseCompletionException(Exception):
+	pass
+
+class CancelledException(BaseCompletionException):
+	pass
+
+class InterruptedException(BaseCompletionException):
+	def __init__(self, cause: Exception):
+		super().__init__()
+		self.__cause = cause
 
 def absorbException(exc : BaseException):
 	"""
@@ -18,6 +49,16 @@ def absorbException(exc : BaseException):
 			absorbException(x)
 	if isinstance(exc, SystemExit | KeyboardInterrupt):
 		raise exc
+	return exc
+
+def wouldAbsorbRaise(exc : BaseException):
+	"""
+	Returns true if 'absorbException' would raise from the specified exception.
+	"""
+	if isinstance(exc,BaseExceptionGroup):
+		if any(wouldAbsorbRaise(x) for x in exc.exceptions):
+			return True
+	return isinstance(exc, SystemExit | KeyboardInterrupt)
 
 def isInterrupt(exc : BaseException):
 	"""
@@ -28,13 +69,22 @@ def isInterrupt(exc : BaseException):
 		for x in exc.exceptions:
 			if not isInterrupt(x):
 				return False
-	return not isinstance(exc, SystemExit | KeyboardInterrupt | CancelledException)
+	return isinstance(exc, SystemExit | KeyboardInterrupt | CancelledException | InterruptedException)
 
-class BaseCompletionException(Exception):
-	pass
+def wrapException(exc : BaseException):
+	"""
+	Moves the specified exception out of scope for the purposes
+	of absorbing. Use this to avoid cascading absorb failures.
+	"""
+	if wouldAbsorbRaise(exc):
+		return InterruptedException(exc)
+	return exc
 
-class CancelledException(BaseCompletionException):
-	pass
+async def awaitableToCoroutine(awaitable : Awaitable[A]) -> A:
+	"""
+	A simple coroutine performing an await operation on the specified awaitable.
+	"""
+	return await awaitable
 
 class Future(Generic[A]):
 	"""
@@ -62,6 +112,11 @@ class Future(Generic[A]):
 		Returns True if this future has the result ready. False otherwise.
 		"""
 		return self.__result is not None
+	
+	def failed(self):
+		if not self.done():
+			return False
+		return self.exception() is not None
 		
 	def result(self) -> A:
 		"""
@@ -92,6 +147,14 @@ class Future(Generic[A]):
 			future.set_exception(what)
 		else:
 			future.set_result(what)
+	
+	def __await__(self):
+		if not self.done():
+			yield self
+		return self.result()
+	
+	def __iter__(self):
+		return (yield from self.__await__())
 
 class Delayer():
 	"""
@@ -110,7 +173,7 @@ class Delayer():
 		"""
 		raise Exception("Not implemented!")
 	
-	def thenCall(self,proc : Callable[[*T], None],*args : *T,**kwargs):
+	def thenCall(self,proc : Callable[P, None],*args : P.args,**kwargs : P.kwargs):
 		"""
 		Alternative to 'then' where proc receives the specified arguments.
 		"""
@@ -229,6 +292,12 @@ class Completion(Delayer):
 	
 	@override
 	def then(self,proc : Callable):
+		"""
+		Invokes the procedure as soon as this Completion is
+		completed with this Completion as the only argument.
+
+		Will invoke immediately if already completed.
+		"""
 		if self.__queue != None:
 			self.__queue.append(proc)
 		else:
@@ -238,22 +307,7 @@ class Completion(Delayer):
 		if self.__queue != None:
 			yield self
 
-class Completed(Completion):
-	"""
-	A Completion that is completed with None as it's value.
-	"""
-	__instance : 'Completed | None' = None
-	def __new__(cls) -> Self:
-		if cls is not Completed:
-			self = super().__new__(cls)
-			self._complete()
-			return self
-		if Completed.__instance is None:
-			Completed.__instance = super().__new__(cls)
-			Completed.__instance._complete()
-		return Completed.__instance
-
-class CompletionFuture(Future[A],Completion):
+class CompletionFuture(Future[A],Completion,Awaitable[A]):
 	"""
 	Combination of Future and Completion. Awaiting additionally returns the result, or raises the exception.
 	"""
@@ -275,11 +329,20 @@ class CompletionFuture(Future[A],Completion):
 	@override
 	def _complete(self):
 		raise Exception("_complete may not be called directly on CompletionFuture.")
+		
+	def _minimal(self):
+		newCompletion = CompletionFuture()
+		self.then(newCompletion._copyFrom)
+		return newCompletion
 
-	@override
-	def __await__(self):
-		yield from super().__await__()
-		return self.result()
+	def _callAndSetResult(self, proc : Callable[[*T],A], *args : *T, **kwargs):
+		try:
+			result = proc(*args,**kwargs)
+		except BaseException as exc:
+			self._setException(wrapException(exc))
+			absorbException(exc)
+		else:
+			self._setResult(result)
 		
 	def withDelay(self,delayer : Delayer) -> 'CompletionFuture[A]':
 		"""
@@ -302,28 +365,37 @@ class CompletionFuture(Future[A],Completion):
 		future = loop.create_future()
 		self.thenCall(functools.partial(self.copyToAsyncioFuture,future))
 		return future
+	
+	def thenComplete(self, target : 'CompletableFuture'):
+		self.then(target.copyFrom)
 
-class CompletableFuture(CompletionFuture):
+class CompletableFuture(CompletionFuture[A]):
+	"""
+	A CompletableFuture is an open CompletionFuture. At any point
+	it may be completed by a caller.
+
+	It also supports the context manager protocol, (with) setting an exception
+	if it has not been completed before exiting the context.
+	"""
 	def __new__(cls) -> Self:
 		return super().__new__(cls)
 	
-	def setResult(self, resultValue):
-		return self._setResult(resultValue)
+	setResult = CompletionFuture._setResult
+	setException = CompletionFuture._setException
+	copyFrom = CompletionFuture._copyFrom
+	minimal = CompletionFuture._minimal
+	callAndSetResult = CompletionFuture._callAndSetResult
 	
-	def setException(self, exceptionValue):
-		return self._setException(exceptionValue)
-	
-	def callAndSetResult(self, proc : Callable[[*T],A], *args : *T, **kwargs):
-		try:
-			result = proc(*args,**kwargs)
-		except BaseException as exc:
-			self.setException(exc)
-			absorbException(exc)
-		else:
-			self.setResult(result)
+	def __enter__(self):
+		return self
 
-class Instant(CompletionFuture):
-	def __new__(cls, result = None, exception = None) -> Self:
+	def __exit__(self, exct, excc, excs):
+		if not self.done():
+			assert excc is not None
+			self.setException(excc)
+
+class Instant(CompletionFuture[A]):
+	def __new__(cls, result : A = None, exception = None) -> Self:
 		self = super().__new__(cls)
 		if exception is not None:
 			self._setException(exception)
@@ -331,41 +403,93 @@ class Instant(CompletionFuture):
 			self._setResult(result)
 		return self
 
-async def _wrapAwaitable(awaitable : Awaitable[A]) -> A:
-	return await awaitable
-
 class Task(CompletionFuture[A]):
 	"""
 	Performs an await operation and returns the result.
 	"""
 
 	__coro : Coroutine[Delayer,None,A]
-	def __new__(cls, coro : Awaitable[A]) -> CompletionFuture:
+	def __new__(cls, coro : Awaitable[A]) -> CompletionFuture[A]:
 		if isinstance(coro,CompletionFuture):
 			return coro
+		if isinstance(coro,Lazy):
+			return coro.start()
 		if not isinstance(coro,Coroutine):
 			# Generic Delayer is also wrapped.
-			coro = _wrapAwaitable(coro)
+			coro = awaitableToCoroutine(coro)
 		self = super().__new__(cls)
 		self.__coro = coro
 		self._advance(None)
 		return self
 	
 	def _advance(self,_):
-		try:
-			result = self.__coro.send(None)
-		except StopIteration as exc:
-			self._setResult(exc.value)
-		except BaseException as exc:
+		exception = None
+		while True:
 			try:
-				self._setException(exc)
-			except BaseException as bexc:
-				absorbException(exc)
-				absorbException(bexc)
-				raise ExceptionGroup("",[exc,bexc])
-			absorbException(exc)
-		else:
-			result.then(self._advance)
+				if exception is not None:
+					result = self.__coro.throw(exception)
+				else:
+					result = self.__coro.send(None)
+			except StopIteration as exc:
+				self._setResult(exc.value)
+				return
+			except BaseException as exc:
+				try:
+					self._setException(wrapException(exc))
+				except BaseException as bexc:
+					absorbException(exc)
+					absorbException(bexc)
+					raise ExceptionGroup("",exceptions = [exc,bexc])
+				else:
+					absorbException(exc)
+				return
+			else:
+				if isinstance(result,Delayer):
+					result.then(self._advance)
+					return
+				else:
+					exception = Exception(f"Awaiting {type(result)} is not supported!")
+
+class Lazy(Future[A],Delayer):
+	"""
+	Represents a background computation that may possibly not be started.
+	Calling the start method or awaiting will start the computation.
+	This is not a CompletionFuture.
+
+	Use with Gather to avoid starting multiple tasks when one fails early.
+	"""
+	__proc : Callable[...,Awaitable[A]]
+	__task : Delayer | None
+	def __new__(cls, fun : Callable[P,Awaitable[A]], *args : P.args, **kwargs : P.kwargs) -> 'Lazy[A]':
+		self = super().__new__(cls)
+		self.__proc = functools.partial(fun, *args, **kwargs)
+		self.__task = None
+		return self
+	
+	def start(self) -> CompletionFuture[A]:
+		"""
+		Starts the background computation without blocking, and returns a CompletionFuture
+		representing the computation.
+		"""
+		if self.__task is None:
+			try:
+				self.__task = Task(self.__proc())
+			except BaseException as ex:
+				self.__task = Instant(exception = wrapException(ex))
+				absorbException(ex)
+			finally:
+				self.__task.then(self._copyFrom)
+		return self.__task
+	
+	__call__ = start
+	
+	@override
+	def then(self, proc):
+		self.start().thenCall(proc, self)
+	
+	@override
+	def thenCall(self,proc : Callable[P, None],*args : P.args,**kwargs : P.kwargs):
+		self.start().thenCall(proc, *args, **kwargs)
 
 def aggressiveTask(coro : Awaitable[A]):
 	"""
@@ -378,7 +502,7 @@ def aggressiveTask(coro : Awaitable[A]):
 	if isinstance(coro,Delayer):
 		raise BaseException("Cannot await non-completion Delayer inside aggressive task.")
 	if not isinstance(coro,Coroutine):
-		coro = _wrapAwaitable(coro)
+		coro = awaitableToCoroutine(coro)
 	toThrow = None
 	while True:		
 		try:
@@ -431,13 +555,17 @@ class AsyncTask(CompletionFuture[A]):
 	Wraps an asyncio awaitable in a CompletionFuture. If it is not a future,
 	it is scheduled for execution.
 	"""
+	__future : asyncio.Future
 	def __new__(cls, asyncCoro : Awaitable[A], loop : asyncio.AbstractEventLoop | None = None) -> Self:
 		self = super().__new__(cls)
-		future = asyncio.ensure_future(asyncCoro, loop = loop)
-		future.add_done_callback(self.__completeFromFuture)
+		self.__future = asyncio.ensure_future(asyncCoro, loop = loop)
+		if self.__future.done():
+			self.__completeFromAsyncioFuture(self.__future)
+		else:
+			self.__future.add_done_callback(self.__completeFromAsyncioFuture)
 		return self
-	
-	def __completeFromFuture(self, future : asyncio.Future[A]):
+
+	def __completeFromAsyncioFuture(self, future : asyncio.Future[A]):
 		if future.cancelled():
 			self._setException(CancelledException())
 		else:
@@ -447,30 +575,80 @@ class AsyncTask(CompletionFuture[A]):
 			else:
 				self._setException(exc)
 
-class Gather(Generic[*T],CompletionFuture[Tuple[*T]]):
+def completePolicy(*fut : Future):
+	"""
+	Gather completes when all futures are done.
+	Result will be tuple of results if all succeeded.
+	If any failed, Gather fails.
+	"""
+	if all(k.done() for k in fut):
+		if any(k.failed() for k in fut):
+			exc = ExceptionGroup("", (k.exception() for k in fut if k.failed()))
+			return Instant(exception = exc)
+		return Instant(result = tuple(k.result() for k in fut))
+	return None
+
+def tuplePolicy(*fut : Future):
+	"""
+	Gather completes when all futures are done with a tuple of results.
+	If any fails, Gather completes with the first exception.
+	"""
+	for f in filter(Future.failed,fut): return f
+	if all(k.done() for k in fut):
+		return Instant(result = tuple(k.result() for k in fut))
+	return None
+
+def cancelPolicy(core : Future[A], cancel : Future) -> Future[A]:
+	"""
+	Gather completes when the first future completes with the result of the first future.
+	If the second future fails sooner, Gather also does so.
+	"""
+	if cancel.failed():
+		return cancel
+	if core.done():
+		return core
+	return None
+
+def orPolicy(*fut : CompletionFuture):
+	"""
+	Performs a disjunction over futures.
+	Gather completes early if any complete with True.
+	"""
+	for f in filter(lambda f: f.done() and f.result(), fut): return f
+	for f in filter(Future.failed,fut): return f
+	if all(k.done() for k in fut):
+		return Instant(False)
+	return None
+
+def andPolicy(*fut : CompletionFuture):
+	"""
+	Performs a conjunction over futures.
+	Gather completes early if any complete with False.
+	"""
+	for f in filter(lambda f: f.done() and not f.result(), fut): return f
+	for f in filter(Future.failed,fut): return f
+	if all(k.done() for k in fut):
+		return Instant(True)
+	return None
+
+class Gather(CompletionFuture[A]):
 	__completions : List[CompletionFuture]
-	__failFast : bool
-	@overload
-	def __new__(cls, a : Awaitable[A], /) -> 'Gather[A]': ...
-	@overload
-	def __new__(cls, a : Awaitable[A], b : Awaitable[B], /) -> 'Gather[A,B]': ...
-	@overload
-	def __new__(cls, a : Awaitable[A], b : Awaitable[B], c : Awaitable[C], /) -> 'Gather[A,B,C]': ...
-	@overload
-	def __new__(cls, a : Awaitable[A], b : Awaitable[B], c : Awaitable[C], d : Awaitable[D], /) -> 'Gather[A,B,C,D]': ...
-	def __new__(cls, *completions : CompletionFuture | Coroutine, failFast : bool = True) -> Self:
+	__pendingCallsToAdvance : int
+	__policy : Callable
+	def __new__(
+			cls,
+			*completions : CompletionFuture | Coroutine,
+			policy : Callable[[*T],Future[A]] = tuplePolicy,
+			failFast : bool = False) -> 'Gather[A]':
 		self = super().__new__(cls)
-		if len(completions) == 0:
-			self._setResult(())
-			return self
-		
+
 		self.__completions = []
-		self.__failFast = failFast
+
 		exception = None
-		doRaise = False
+		failed = False
 
 		for c in completions:
-			if exception is not None:
+			if failed:
 				if isinstance(c, Coroutine):
 					c.close()
 			else:
@@ -479,53 +657,66 @@ class Gather(Generic[*T],CompletionFuture[Tuple[*T]]):
 				except BaseException as ex:
 					# This may be an interrupt!
 					exception = ex
-					doRaise = True
+					failed = True
 				else:
 					self.__completions.append(t)
-					if failFast and t.done():
-						exception = t.exception()
-		
-		if doRaise:
-			raise exception
+					failed = failFast and t.failed()
 		
 		if exception is not None:
-			absorbException(exception)
-			self._setException(exception)
-		else:
-			self.__remaining = len(self.__completions)
-			for c in self.__completions:
-				c.then(self.__advance)
+			raise exception
+
+		self.__policy = policy
+
+		self.__pendingCallsToAdvance = 1
+
+		for t in self.__completions:
+			if not t.done():
+				self.__pendingCallsToAdvance += 1
+				t.then(self.__advance)
 		
+		self.__advance(None)
+
 		return self
-	
-	def __advance(self, completion : CompletionFuture):
-		if self.__remaining == 0:
+
+	def __advance(self, _):
+		if self.__pendingCallsToAdvance == 0:
 			return
 
-		if self.__failFast and completion.exception() is not None:
-			self.__remaining = 0
-			self._setException(completion.exception())
-			return
-				
-		self.__remaining -= 1
+		self.__pendingCallsToAdvance -= 1
 
-		if self.__remaining == 0:
-
-			exceptionList = []
-			resultList = []
-			
-			for c in self.__completions:
-				if c.exception() is not None:
-					exceptionList.append(c.exception())
-				else:
-					resultList.append(c.result())
-			
-			if len(exceptionList) == 1:
-				self._setException(exceptionList[0])
-			elif len(exceptionList) != 0:
-				self._setException(ExceptionGroup("",exceptions=exceptionList))
+		try:
+			fin : Awaitable | None = self.__policy(*self.__completions)
+		except BaseException as exc:
+			self.__pendingCallsToAdvance = 0
+			self._setException(wrapException(exc))
+			absorbException(exc)
+		else:
+			if fin is None:
+				if self.__pendingCallsToAdvance == 0:
+					self._setException(Exception("Ran out of things to wait for without producing a result."))
 			else:
-				self._setResult(tuple(resultList))
+				self.__pendingCallsToAdvance = 0
+				Task(fin).then(self._copyFrom)
+
+@overload
+def gather(a : Awaitable[A]) -> Awaitable[Tuple[A]]: ...
+@overload
+def gather(a : Awaitable[A], b : Awaitable[B]) -> Awaitable[Tuple[A,B]]: ...
+@overload
+def gather(a : Awaitable[A], b : Awaitable[B], c : Awaitable[C]) -> Awaitable[Tuple[A,B,C]]: ...
+@overload
+def gather(a : Awaitable[A], b : Awaitable[B], c : Awaitable[C], d : Awaitable[D]) -> Awaitable[Tuple[A,B,C,D]]: ...
+@overload
+def gather(a : Awaitable[A], b : Awaitable[B], c : Awaitable[C], d : Awaitable[D], e : Awaitable[E]) -> Awaitable[Tuple[A,B,C,D,E]]: ...
+
+def gather(*c : Awaitable) -> Awaitable:
+	return Gather(*c, policy = tuplePolicy, failFast = True)
+
+def gatherOr(*c : Awaitable[bool]) -> Awaitable[bool]:
+	return Gather(*c, policy = orPolicy)
+
+def gatherAnd(*c : Awaitable[bool]) -> Awaitable[bool]:
+	return Gather(*c, policy = andPolicy)
 
 #class Lock(Delayer):
 #	"""

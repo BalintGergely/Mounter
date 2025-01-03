@@ -179,7 +179,7 @@ class InputCppGroup(CppGroup):
 	@override
 	@once
 	def onCompile(self, mainGroup : 'CppGroup'):
-		return Gather(*[c(mainGroup) for c in self.compileEventListeners])
+		return gather(*(c(mainGroup) for c in self.compileEventListeners))
 
 class AggregatorCppGroup(CppGroup):
 	def __init__(self, dependencies : Dict[CppGroup,bool] = ()) -> None:
@@ -222,7 +222,7 @@ class AggregatorCppGroup(CppGroup):
 
 	@once
 	def onCompile(self, mainGroup: CppGroup):
-		return Gather(*[g.onCompile(mainGroup) for g in self._dependencies.keys()])
+		return gather(*(g.onCompile(mainGroup) for g in self._dependencies.keys()))
 
 class ClangCppGroup(AggregatorCppGroup):
 	def __init__(self,
@@ -271,6 +271,8 @@ class ClangCppGroup(AggregatorCppGroup):
 	
 	async def __runCommandHandleResult(self, commandSeq, progressUnit):
 		(rc, a, b) = await self.ws[AsyncOps].runCommand(commandSeq, progressUnit = progressUnit)
+		if rc == 0xC000013A:
+			raise KeyboardInterrupt()
 		if b != b'' or rc != 0:
 			print(f"Error: {subprocess.list2cmdline(commandSeq)}")
 			print(b.decode(),end="")
@@ -279,21 +281,20 @@ class ClangCppGroup(AggregatorCppGroup):
 			raise Exception("Clang command fail")
 		return a == b'' and b == b''
 
-	@op
-	async def __preprocess(self, sourceFile : Path) -> Path:
+	async def __doPreprocess(self, sourceFile : Path, done : CompletableFuture[Path]):
 		"""
 		Preprocess the specified source file.
-		Returns after the operation is done, with the Path of the preprocessed file.
+		Completes the specified CompletableFuture with the result, and performs post-operation checks.
 		"""
-		with self.ws[Progress].register() as pu:
+		with self.ws[Progress].register() as pu, done:
 			outputFile = sourceFile \
 				.relativeTo(self.__rootDirectory) \
 				.moveTo(self.__srcDirectory) \
 				.withExtension("cpp")
-			includes,args,_ = await Gather(
-				self._getMyIncludes(),
-				self.__getAdditionalArguments(),
-				self.ws[AsyncOps].redLight()
+			includes,args,_ = await gather(
+				Lazy(self._getMyIncludes),
+				Lazy(self.__getAdditionalArguments),
+				Lazy(self.ws[AsyncOps].redLight)
 			)
 
 			args = sorted(args)
@@ -301,12 +302,12 @@ class ClangCppGroup(AggregatorCppGroup):
 			deltaChecker = self.ws[FileDeltaChecker]
 
 			dependencyHash = []
-			dependencyHash.append(Task(deltaChecker.query(sourceFile)))
+			dependencyHash.append(deltaChecker.query(sourceFile))
 
 			for i in sorted(includes):
-				dependencyHash.append(Task(deltaChecker.query(PathSet(f"{i}/**/"))))
+				dependencyHash.append(deltaChecker.query(PathSet(f"{i}/**/")))
 			
-			dependencyHash = [await d for d in dependencyHash]
+			dependencyHash = list(await gather(*dependencyHash))
 			
 			data = self.ws[FileManagement].lock(outputFile, self)
 			includeHash = data.get("includeHash",())
@@ -324,33 +325,34 @@ class ClangCppGroup(AggregatorCppGroup):
 			if data.get("dependencyHash",None) != dependencyHash \
 			or data.get("args",None) != args \
 			or not data.get("stable",None) \
-			or not all([await k for k in [Task(deltaChecker.test(v)) for v in includeHash]]) \
+			or not await gatherAnd(*(deltaChecker.test(v) for v in includeHash)) \
 			or not outputFile.isPresent():
 				data.clear()				
 				data["args"] = args
 				data["dependencyHash"] = dependencyHash
-				st = False
-				
-				async def finalizeData():
-					nonlocal outputFile
-					nonlocal self
-					nonlocal includes
-					nonlocal data
-					nonlocal st
-					includeHash = []
-					ipset = await self.ws[AsyncOps].callInBackground(functools.partial(readIncludes, outputFile))
-					for path in ipset:
-						if any(i.isSubpath(path) for i in includes):
-							includeHash.append(Task(deltaChecker.query(path)))
-					data["includeHash"] = [await k for k in includeHash]
-					data["stable"] = st
 
 				outputFile.getAncestor().opCreateDirectories()
+				
 				st = await self.__runCommandHandleResult(cmd, pu)
-				self.ws[AsyncOps].completeLater(finalizeData())
+
+				done.setResult(outputFile)
+
+				includeHash = []
+				ipset = await self.ws[AsyncOps].callInBackground(functools.partial(readIncludes, outputFile))
+				for path in ipset:
+					if any(i.isSubpath(path) for i in includes):
+						includeHash.append(deltaChecker.query(path))
+				data["includeHash"] = await gather(*includeHash)
+				data["stable"] = st
 			else:
 				pu.setUpToDate()
-			return outputFile
+				done.setResult(outputFile)
+
+	@once
+	def __preprocess(self, sourceFile : Path) -> Awaitable[Path]:
+		done = CompletableFuture()
+		self.ws[AsyncOps].completeLater(Task(self.__doPreprocess(sourceFile, done)))
+		return done.minimal()
 	
 	@op
 	async def __compile(self, sourceFile) -> Path:
@@ -359,10 +361,10 @@ class ClangCppGroup(AggregatorCppGroup):
 		Returns after the operation is done, with the Path of the object file.
 		"""
 		with self.ws[Progress].register() as pu:
-			preFile,args,_ = await Gather(
-				self.__preprocess(sourceFile),
-				self.__getAdditionalArguments(),
-				self.ws[AsyncOps].redLight()
+			preFile,args,_ = await gather(
+				Lazy(self.__preprocess,sourceFile),
+				Lazy(self.__getAdditionalArguments),
+				Lazy(self.ws[AsyncOps].redLight)
 			)
 			
 			args = sorted(args)
@@ -459,12 +461,12 @@ class ClangCppGroup(AggregatorCppGroup):
 		with self.ws[Progress].register() as pu:
 			deltaChecker = self.ws[FileDeltaChecker]
 
-			(binDirectory,staticLibraries,allObjects,args,_) = await Gather(
-				self.getBinDirectory(),
-				self._getMyStaticLibraries(),
-				self.getObjects(),
-				self.__getAdditionalArguments(),
-				self.ws[AsyncOps].redLight()
+			(binDirectory,staticLibraries,allObjects,args,_) = await gather(
+				Lazy(self.getBinDirectory),
+				Lazy(self._getMyStaticLibraries),
+				Lazy(self.getObjects),
+				Lazy(self.__getAdditionalArguments),
+				Lazy(self.ws[AsyncOps].redLight)
 			)
 			
 			args = sorted(args)
@@ -526,14 +528,14 @@ class ClangCppGroup(AggregatorCppGroup):
 	
 	@op
 	async def copyDlls(self):
-		(dllSet,binDirectory) = await Gather(self._getMyDynamicLibraries(),self.getBinDirectory())
-		tasks = [self.ws[FileManagement].copyFile(l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet]
-		await self.ws[AsyncOps].redLight()
-		await Gather(*tasks)
+		(dllSet,binDirectory) = await gather(Lazy(self._getMyDynamicLibraries),Lazy(self.getBinDirectory))
+		await gather(*(
+			Lazy(self.ws[FileManagement].copyFile,l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet
+		))
 	
 	@once
 	def compile(self):
-		return Gather(self.link(),self.copyDlls(),self.onCompile(self))
+		return gather(Lazy(self.link),Lazy(self.copyDlls),Lazy(self.onCompile,self))
 
 class CppModule(Module):
 	def __init__(self, context) -> None:

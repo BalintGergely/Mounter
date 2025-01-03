@@ -48,6 +48,7 @@ class FileManagement(Module):
 	async def copyFile(self, sourcePath : Path, targetPath : Path):
 		with self.ws[Progress].register() as pu:
 			pu.setName(f"Copy {sourcePath} to {targetPath}")
+			await self.ws[AsyncOps].redLight()
 			sourceHash = await self.ws[FileDeltaChecker].query(sourcePath)
 			data = self.lock(targetPath,self)
 			if sourceHash != data.get("sourceHash",None) \

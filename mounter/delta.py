@@ -27,7 +27,7 @@ class PathCheckObject():
 			return TYPE_NONE
 		if self.path.isFile():
 			return TYPE_FILE
-		if "exists" in hints or self.path.isDirectory():
+		if self.path.isDirectory():
 			return TYPE_DIR
 		return TYPE_NONE
 	
