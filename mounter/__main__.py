@@ -8,6 +8,8 @@ from mounter.persistence import Persistence
 from mounter.goal import GoalTracker
 from mounter.progress import Progress
 from mounter.operation import AsyncOps
+from mounter.operation.completion import isInterrupt
+from mounter.exceptions import BuildException
 
 root = Path("")
 obj = Path("obj")
@@ -67,4 +69,12 @@ if cpp.ClangModule in w:
 	cppManifest.debug = args.debug
 	cppManifest.optimalize = args.optimalize
 
-w.run()
+try:
+	w.run()
+except BaseException as x:
+	if isInterrupt(x):
+		print("Interrupted")
+	elif isinstance(x,BuildException):
+		x.report()
+	else:
+		raise x

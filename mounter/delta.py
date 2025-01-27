@@ -22,8 +22,8 @@ class PathCheckObject():
 		if "id" in self.store and "hash" in self.store:
 			self.revisions[self.store["hash"]] = self.store["id"]
 		
-	def getPathType(self,hints = ()) -> bytes:
-		if "deleted" in hints:
+	def getPathType(self,flags = ()) -> bytes:
+		if "deleted" in flags:
 			return TYPE_NONE
 		if self.path.isFile():
 			return TYPE_FILE
@@ -32,10 +32,10 @@ class PathCheckObject():
 		return TYPE_NONE
 	
 	async def __formatTypeAndName(self):
-		return self.getPathType(hints = ("exists",)) + b'\0' + self.path.getName().encode()
+		return self.getPathType(flags = ("exists",)) + b'\0' + self.path.getName().encode()
 
 	async def __formatPathAndHash(self):
-		return str(self.path).encode() + b'\0' + (await self.getHash(hints = ("exists",))).encode()
+		return str(self.path).encode() + b'\0' + (await self.getHash(flags = ("exists",))).encode()
 
 	def __computeFileHash(self):
 		dig = hashlib.md5()
@@ -48,9 +48,9 @@ class PathCheckObject():
 				dig.update(buf)
 		return dig.hexdigest()
 
-	async def __refreshPathHash(self,hints = ()):
+	async def __refreshPathHash(self,flags = ()):
 		self.subpaths = ()
-		t = self.getPathType(hints)
+		t = self.getPathType(flags)
 		if t == TYPE_NONE:
 			self.subpaths = ()
 			self.store["time"] = None
@@ -65,7 +65,7 @@ class PathCheckObject():
 		if t == TYPE_DIR:
 			dig = hashlib.md5()
 			self.subpaths = tuple(p for p in self.path.getChildren(deterministic = True) if self.checker.isFileRelevant(p))
-			tasks = [Task(self.checker.lookupCheckerByPath(p).__formatTypeAndName()) for p in self.subpaths]
+			tasks = [fftask(self.checker.lookupCheckerByPath(p).__formatTypeAndName()) for p in self.subpaths]
 			for t in tasks:
 				dig.update(b'\0')
 				dig.update(await t)
@@ -73,21 +73,21 @@ class PathCheckObject():
 		self.store["hash"] = fhs
 		self.store["time"] = fmd
 	
-	async def __refreshSetHash(self, hints = ()):
+	async def __refreshSetHash(self, flags = ()):
 		self.subpaths = tuple(p for p in self.path.findAll(deterministic = True) if self.checker.isFileRelevant(p))
 		dig = hashlib.md5()
-		tasks = [Task(self.checker.lookupCheckerByPath(p).__formatPathAndHash()) for p in self.subpaths]
+		tasks = [fftask(self.checker.lookupCheckerByPath(p).__formatPathAndHash()) for p in self.subpaths]
 		for t in tasks:
 			dig.update(b'\0')
 			dig.update(await t)
 		self.store["hash"] = dig.hexdigest()
 
-	async def __refreshHashAndVersion(self, hints = ()):
+	async def __refreshHashAndVersion(self, flags = ()):
 		oldSubpaths = self.subpaths
 		if isinstance(self.path,PathSet):
-			await self.__refreshSetHash(hints)
+			await self.__refreshSetHash(flags)
 		if isinstance(self.path,Path):
-			await self.__refreshPathHash(hints)
+			await self.__refreshPathHash(flags)
 
 		vn = self.revisions.get(self.store["hash"], None)
 		if vn is None:
@@ -100,22 +100,23 @@ class PathCheckObject():
 				ch = self.checker.lookupCheckerByPath(p)
 				ch.hintDeleted()
 
-	async def __refresh(self, hints = ()):
+	async def __refresh(self, flags = ()):
 		while True:
 			rt = self.refreshTask
 			if rt is None:
-				rt = Task(self.__refreshHashAndVersion(hints = hints))
+				rt = Task(self.__refreshHashAndVersion(flags = flags))
 				self.refreshTask = rt
 			if rt.done():
 				return
 			await rt
 
-	async def getHash(self, hints = ()) -> str:
-		await self.__refresh(hints = hints)
+	async def getHash(self, flags = ()) -> str:
+		await self.__refresh(flags = flags)
 		return self.store["hash"]
 
 	async def getVersion(self):
 		await self.__refresh()
+		assert "hash" in self.store, "Cannot get version for file that does not exist!"
 		vn = self.store.get("id",None)
 		if vn is None: # Assign a new vn if absent.
 			vn = self.checker._newVersion(self)
@@ -138,7 +139,7 @@ class PathCheckObject():
 				self.checker.lookupCheckerByPath(p).clear()
 	
 	def hintDeleted(self):
-		aggressiveTask(self.__refresh(hints = ("deleted",)))
+		aggressiveTask(self.__refresh(flags = ("deleted",)))
 
 class FileDeltaChecker(Module):
 	def __init__(self, context: Workspace) -> None:

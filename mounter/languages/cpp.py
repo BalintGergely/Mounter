@@ -11,6 +11,7 @@ from mounter.progress import *
 from mounter.goal import *
 from mounter.operation import *
 from mounter.operation.completion import Instant, Task
+from mounter.exceptions import BuildException
 
 CPP_STRING_LITERAL = re.compile((
 	r"(?P<kind>L|u8|u|U)?" # Literal kind
@@ -98,30 +99,33 @@ def readIncludes(path : Path):
 	return frozenset(includePaths)
 
 class CppGroup():
-	def getIncludes(self) -> FrozenSet[Path]:
+	def __init__(self,cppModule : 'CppModule'):
+		self.__hash = cppModule._nextGroupHash()
+	
+	def getIncludes(self) -> Awaitable[FrozenSet[Path]]:
 		return Instant(frozenset())
 	
-	def getObjects(self) -> FrozenSet[Path]:
+	def getObjects(self) -> Awaitable[FrozenSet[Path]]:
 		return Instant(frozenset())
 	
-	def getStaticLibraries(self) -> FrozenSet[Path]:
+	def getStaticLibraries(self) -> Awaitable[FrozenSet[Path]]:
 		return Instant(frozenset())
 	
-	def getDynamicLibraries(self) -> FrozenSet[Path]:
+	def getDynamicLibraries(self) -> Awaitable[FrozenSet[Path]]:
 		return Instant(frozenset())
 	
-	def getBinDirectory(self) -> Path:
+	def getBinDirectory(self) -> Awaitable[Path]:
 		raise Exception("Not supported")
 	
-	def getCompileFlags(self) -> FrozenSet[str]:
+	def getCompileFlags(self) -> Awaitable[FrozenSet[str]]:
 		return Instant(frozenset())
 
-	def onCompile(self, mainGroup : 'CppGroup'):
+	def onCompile(self, mainGroup : 'CppGroup') -> Awaitable:
 		"""
 		Called simultaneously as the specified group is being compiled.
 		Useful to perform indirectly related tasks.
 		"""
-		return Instant()
+		return INSTANT
 	
 	def compile() -> Awaitable:
 		raise Exception("Not a compilable CppGroup!")
@@ -132,10 +136,12 @@ class CppGroup():
 	
 	@final
 	def __hash__(self):
-		return id(self)
+		return self.__hash
 
 class InputCppGroup(CppGroup):
+
 	def __init__(self,
+			cppModule : 'CppModule',
 			includes = (),
 			objects = (),
 			staticLibraries = (),
@@ -143,6 +149,7 @@ class InputCppGroup(CppGroup):
 			compileFlags = (),
 			compileEventListeners = (),
 			onLinkCallback = None) -> None:
+		super().__init__(cppModule)
 		self.includes : Set[Path] = set(includes)
 		self.objects : Set[Path] = set(objects)
 		self.staticLibraries : Set[Path] = set(staticLibraries)
@@ -182,30 +189,31 @@ class InputCppGroup(CppGroup):
 		return gather(*(c(mainGroup) for c in self.compileEventListeners))
 
 class AggregatorCppGroup(CppGroup):
-	def __init__(self, dependencies : Dict[CppGroup,bool] = ()) -> None:
+	def __init__(self, cppModule : 'CppModule', dependencies : Dict[CppGroup,bool] = ()) -> None:
+		super().__init__(cppModule)
 		self._dependencies : Dict[CppGroup,bool] = dict(dependencies)
 
-	@op
+	@operation
 	async def __lookupIncludes(self,allowPrivate) -> FrozenSet[Path]:
 		tasks = [g.getIncludes() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
 		return frozenset([i for t in tasks for i in await t])
 
-	@op
+	@operation
 	async def __lookupObjects(self,allowPrivate) -> FrozenSet[Path]:
 		tasks = [g.getObjects() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
 		return frozenset([o for t in tasks for o in await t])
 	
-	@op
+	@operation
 	async def __lookupStaticLibraries(self,allowPrivate) -> FrozenSet[Path]:
 		tasks = [g.getStaticLibraries() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
 		return frozenset([l for t in tasks for l in await t])
 	
-	@op
+	@operation
 	async def __lookupDynamicLibraries(self,allowPrivate) -> FrozenSet[Path]:
 		tasks = [g.getDynamicLibraries() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
 		return frozenset([l for t in tasks for l in await t])
 	
-	@op
+	@operation
 	async def __lookupCompileFlags(self,allowPrivate) -> FrozenSet[str]:
 		tasks = [g.getCompileFlags() for (g,p) in self._dependencies.items() if (allowPrivate or p)]
 		return frozenset([l for t in tasks for l in await t])
@@ -236,10 +244,10 @@ class ClangCppGroup(AggregatorCppGroup):
 			debug : bool = False,
 			useLLVM : bool = True,
 			optimalize : bool = False,
-			sources : AsyncIterable[Path] = None,
+			sources : AsyncIterable[Path] | Iterable[Path] = None,
 			outputName : str = None,
 			) -> None:
-		super().__init__(dependencies)
+		super().__init__(clangModule,dependencies)
 		self.cpp : Final[ClangModule] = clangModule
 		self.ws : Final[Workspace] = clangModule.ws
 		self.__rootDirectory = rootDirectory
@@ -253,8 +261,8 @@ class ClangCppGroup(AggregatorCppGroup):
 		self.__optimalize = optimalize
 		self.__outputName = outputName
 	
-	@op
-	async def __getAdditionalArguments(self):
+	@operation
+	async def __getAdditionalPreprocessArguments(self):
 		flags = await self._getMyCompileFlags()
 		args = set()
 		for f in flags:
@@ -264,21 +272,45 @@ class ClangCppGroup(AggregatorCppGroup):
 				args.add(f)
 		return frozenset(args)
 	
-	@op
+	@operation
+	async def __getAdditionalCompileArguments(self):
+		flags = await self._getMyCompileFlags()
+		args = set()
+		for f in flags:
+			if f.startswith("-std="):
+				args.add(f)
+			if f.startswith("-Wno"):
+				args.add(f)
+		return frozenset(args)
+	
+	@operation
+	async def __getAdditionalLinkerArguments(self):
+		flags = await self._getMyCompileFlags()
+		args = set()
+		for f in flags:
+			if f.startswith("-std="):
+				args.add(f)
+			if f.startswith("-Wno"):
+				args.add(f)
+			if f.startswith("-l"):
+				args.add(f)
+		return frozenset(args)
+
+	@operation
 	async def getBinDirectory(self) -> Path:
 		self.__binDirectory.opCreateDirectories()
 		return self.__binDirectory
 	
 	async def __runCommandHandleResult(self, commandSeq, progressUnit):
 		(rc, a, b) = await self.ws[AsyncOps].runCommand(commandSeq, progressUnit = progressUnit)
-		if rc == 0xC000013A:
-			raise KeyboardInterrupt()
-		if b != b'' or rc != 0:
-			print(f"Error: {subprocess.list2cmdline(commandSeq)}")
-			print(b.decode(),end="")
 		if rc != 0:
-			print(f"Process exited with code {rc}")
-			raise Exception("Clang command fail")
+			raise BuildException(
+				f"[Mounter] Output by: {subprocess.list2cmdline(commandSeq)}\n"
+				+ b.decode()
+				+ f"[Mounter] Process exited with code {rc}.")
+		if b != b'' or rc != 0:
+			print(f"Output by: {subprocess.list2cmdline(commandSeq)}")
+			print(b.decode(),end="")
 		return a == b'' and b == b''
 
 	async def __doPreprocess(self, sourceFile : Path, done : CompletableFuture[Path]):
@@ -292,9 +324,9 @@ class ClangCppGroup(AggregatorCppGroup):
 				.moveTo(self.__srcDirectory) \
 				.withExtension("cpp")
 			includes,args,_ = await gather(
-				Lazy(self._getMyIncludes),
-				Lazy(self.__getAdditionalArguments),
-				Lazy(self.ws[AsyncOps].redLight)
+				self._getMyIncludes(),
+				self.__getAdditionalPreprocessArguments(),
+				self.ws[AsyncOps].redLight()
 			)
 
 			args = sorted(args)
@@ -327,7 +359,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			or not data.get("stable",None) \
 			or not await gatherAnd(*(deltaChecker.test(v) for v in includeHash)) \
 			or not outputFile.isPresent():
-				data.clear()				
+				data.clear()
 				data["args"] = args
 				data["dependencyHash"] = dependencyHash
 
@@ -354,7 +386,7 @@ class ClangCppGroup(AggregatorCppGroup):
 		self.ws[AsyncOps].completeLater(Task(self.__doPreprocess(sourceFile, done)))
 		return done.minimal()
 	
-	@op
+	@operation
 	async def __compile(self, sourceFile) -> Path:
 		"""
 		Compiles the specified source file. (This includes preprocessing)
@@ -362,9 +394,9 @@ class ClangCppGroup(AggregatorCppGroup):
 		"""
 		with self.ws[Progress].register() as pu:
 			preFile,args,_ = await gather(
-				Lazy(self.__preprocess,sourceFile),
-				Lazy(self.__getAdditionalArguments),
-				Lazy(self.ws[AsyncOps].redLight)
+				self.__preprocess(sourceFile),
+				self.__getAdditionalCompileArguments(),
+				self.ws[AsyncOps].redLight()
 			)
 			
 			args = sorted(args)
@@ -441,7 +473,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			return outputFile
 	
 	@override
-	@op
+	@operation
 	async def getObjects(self) -> FrozenSet[Path]:
 		inherited = super().getObjects()
 		if self.__sources is None:
@@ -452,7 +484,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			tasks = [self.__compile(p) for p in self.__sources]
 		return (await inherited).union([await t for t in tasks])
 
-	@op
+	@operation
 	async def link(self) -> Path:
 		"""
 		Links the specific output file in this group.
@@ -462,11 +494,11 @@ class ClangCppGroup(AggregatorCppGroup):
 			deltaChecker = self.ws[FileDeltaChecker]
 
 			(binDirectory,staticLibraries,allObjects,args,_) = await gather(
-				Lazy(self.getBinDirectory),
-				Lazy(self._getMyStaticLibraries),
-				Lazy(self.getObjects),
-				Lazy(self.__getAdditionalArguments),
-				Lazy(self.ws[AsyncOps].redLight)
+				self.getBinDirectory(),
+				self._getMyStaticLibraries(),
+				self.getObjects(),
+				self.__getAdditionalLinkerArguments(),
+				self.ws[AsyncOps].redLight()
 			)
 			
 			args = sorted(args)
@@ -475,10 +507,10 @@ class ClangCppGroup(AggregatorCppGroup):
 			isMain = outputFile.hasExtension("exe")
 			dependencyHash = []
 			for o in sorted(allObjects):
-				dependencyHash.append(Task(deltaChecker.query(o)))
+				dependencyHash.append(fftask(deltaChecker.query(o)))
 			dependencyHash.append(Instant(None))
 			for l in sorted(staticLibraries):
-				dependencyHash.append(Task(deltaChecker.query(l)))
+				dependencyHash.append(fftask(deltaChecker.query(l)))
 			
 			dependencyHash = [await k for k in dependencyHash]
 				
@@ -526,16 +558,16 @@ class ClangCppGroup(AggregatorCppGroup):
 			
 			return outputFile
 	
-	@op
+	@operation
 	async def copyDlls(self):
-		(dllSet,binDirectory) = await gather(Lazy(self._getMyDynamicLibraries),Lazy(self.getBinDirectory))
+		(dllSet,binDirectory) = await gather(self._getMyDynamicLibraries(),self.getBinDirectory())
 		await gather(*(
-			Lazy(self.ws[FileManagement].copyFile,l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet
+			self.ws[FileManagement].copyFile(l,l.relativeToAncestor().moveTo(binDirectory)) for l in dllSet
 		))
 	
 	@once
 	def compile(self):
-		return gather(Lazy(self.link),Lazy(self.copyDlls),Lazy(self.onCompile,self))
+		return gather(self.link(),self.copyDlls(),self.onCompile(self))
 
 class CppModule(Module):
 	def __init__(self, context) -> None:
@@ -548,6 +580,12 @@ class CppModule(Module):
 		self.objDirectory = self.rootDirectory.subpath("obj/cpp")
 		self.binDirectory = self.rootDirectory.subpath("bin")
 		self.srcDirectory = self.objDirectory
+		self.__hashCounter = 0
+	
+	def _nextGroupHash(self) -> int:
+		h = self.__hashCounter
+		self.__hashCounter += 1
+		return hash(h)
 	
 	def makeGroup(self,*,
 			dependencies : Dict[CppGroup,bool] = ...,
@@ -589,16 +627,16 @@ class CppProject(Module,SupportsCppGroup):
 	def __init__(self, context, projectFile = None, *dependencies) -> None:
 		super().__init__(context)
 		self.ws.add(GoalTracker)
-		self.ws.add(CppModule)
+		cppModule = self.ws.add(CppModule)
 		self._dependencies = tuple(self.ws.add(d) for d in dependencies)
 		if projectFile is not None:
 			self._dir = Path(projectFile).getAncestor()
 		else:
 			self._dir = None
-		self.group = InputCppGroup()
+		self.group = InputCppGroup(cppModule)
 		self.group.compileEventListeners.append(self.onCompile)
 		self.rootDirectory = ...
-		self.privateGroup = InputCppGroup()
+		self.privateGroup = InputCppGroup(cppModule)
 		self.compilationUnits : Set[Path] = set()
 		self.mains : Set[Path | str] = set()
 		self.__mainPaths : Set[Path] = set()
@@ -613,7 +651,7 @@ class CppProject(Module,SupportsCppGroup):
 	async def onCompile(self,mainGroup : CppGroup):
 		pass
 	
-	@op
+	@operation
 	async def getCppGroup(self):
 		dependencies = {
 			self.group : True,
@@ -630,7 +668,7 @@ class CppProject(Module,SupportsCppGroup):
 			sources = self.compilationUnits,
 			rootDirectory = self.rootDirectory)
 	
-	@op
+	@operation
 	async def _compileExecutable(self,mainFile : Path,name : str):
 		mainGroup = self.ws[CppModule].makeGroup(
 			dependencies = [(await self.getCppGroup(),True)],
@@ -644,7 +682,7 @@ class CppProject(Module,SupportsCppGroup):
 				p = self._dir.subpath(p)
 			self.__mainPaths.add(p)
 		self.fillGroup()
-		for p in self.__mainPaths:
+		for p in sorted(self.__mainPaths):
 			name = p.withExtension("exe").getName()
 			if self.ws[GoalTracker].defineThenQuery(name):
 				self.ws[AsyncOps].completeLater(self._compileExecutable(p,name))

@@ -44,7 +44,7 @@ class FileManagement(Module):
 	def __doCopy(sourcePath : Path, targetPath : Path):
 		sourcePath.opCopyTo(targetPath)
 	
-	@op
+	@operation
 	async def copyFile(self, sourcePath : Path, targetPath : Path):
 		with self.ws[Progress].register() as pu:
 			pu.setName(f"Copy {sourcePath} to {targetPath}")

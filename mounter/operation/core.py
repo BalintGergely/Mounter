@@ -4,6 +4,7 @@ import concurrent.futures
 import subprocess
 import functools
 import concurrent
+import signal
 from typing import TypeVarTuple, Tuple, Awaitable, Callable, Type
 from mounter.workspace import Module
 from mounter.operation.completion import *
@@ -11,6 +12,98 @@ from mounter.operation.completion import *
 A = TypeVar("A")
 P = ParamSpec("P")
 T = TypeVarTuple("T")
+
+class BaseOpTask(CompletionFuture[A]):
+	def __eq__(self, value):
+		return self is value
+	
+	def __hash__(self):
+		return id(self)
+
+	def tryCancel(self):
+		pass
+
+class RedLightTask(BaseOpTask):
+	def __new__(cls, loop : asyncio.AbstractEventLoop):
+		self = super().__new__(cls)
+		loop.call_soon(self.__callback)
+		return self
+	
+	@override
+	def tryCancel(self):
+		if not self.done():
+			self._setException(CancelledException())
+	
+	def __callback(self):
+		if not self.done():
+			self._setResult(None)
+
+class AsyncioCommandTask(BaseOpTask[Tuple[int,bytes,bytes]]):
+	__task : asyncio.Task
+	__process : asyncio.subprocess.Process
+
+	def __new__(cls, loop : asyncio.AbstractEventLoop, commandStr : str, input : bytes):
+		self = super().__new__(cls)
+		self.__task = loop.create_task(self.__runCommandOnAsyncio(commandStr, input))
+		self.__task.add_done_callback(self.__taskDoneCallback)
+		self.__process = None
+		return self
+	
+	def __taskDoneCallback(self,fut):
+		self._copyFrom(AsyncTask(fut))
+		
+	@override
+	def tryCancel(self):
+		self.__task.cancel()
+	
+	async def __runCommandOnAsyncio(self, commandStr : str, input : bytes):
+		self.__process = await asyncio.create_subprocess_shell(commandStr,
+					stdout=asyncio.subprocess.PIPE,
+					stderr=asyncio.subprocess.PIPE,
+					stdin=asyncio.subprocess.PIPE)
+		
+		try:
+			(stdout,stderr) = await self.__process.communicate(input = input)
+		except asyncio.CancelledError:
+			await self.__process.wait()
+			raise
+		
+		return (self.__process.returncode, stdout, stderr)
+
+class ThreadPoolBackgroundTask(BaseOpTask[A]):
+	__delay : Delayer
+	def __new__(cls, command : Callable[[],A], pool : concurrent.futures.ThreadPoolExecutor, delay : Delayer):
+		self = super().__new__(cls)
+		self.__delay = delay
+		self.__delay.thenCall(self.__createTask, command, pool)
+		return self
+	
+	def __createTask(self, command : Callable[[],A], pool : concurrent.futures.ThreadPoolExecutor):
+		if not self.done():
+			self.__task = pool.submit(command)
+			self.__task.add_done_callback(self.__taskDoneCallbackUnsafe)
+
+	def __taskDoneCallbackUnsafe(self,fut):
+		self.__delay.thenCall(self.__taskDoneCallback,fut)
+
+	def __taskDoneCallback(self,fut : concurrent.futures.Future):
+		if fut.cancelled():
+			self._setException(CancelledException())
+		else:
+			ex = fut.exception()
+			if ex is None:
+				self._setResult(fut.result())
+			else:
+				self._setException(ex)
+		
+	@override
+	def tryCancel(self):
+		if self.done():
+			return
+		if self.__task is None:
+			self._setException(CancelledException())
+		else:
+			self.__task.cancel()
 
 class AsyncOps(Module):
 	"""
@@ -21,50 +114,44 @@ class AsyncOps(Module):
 	def __init__(self, context) -> None:
 		super().__init__(context)
 		self.__runner = asyncio.Runner()
+		self.__threadPool = concurrent.futures.ThreadPoolExecutor()
 		self.__runnerDelayer = None
 		self.__interruptState = CompletableFuture()
 		self.__mustComplete : List[Future] = []
 		self.__seqMode = False
-		self.__attached : List[Completion] | None = None
+		self.__attached : List[BaseOpTask] = None
 		self.__currentRedLight = None
-		self.__threadPool = concurrent.futures.ThreadPoolExecutor()
+		self.__rawInterrupted : bool = False
 	
 	def disableAsync(self):
 		self.__seqMode = True
 	
+	def __unsafeInterrupt(self, *_):
+		self.__rawInterrupted = True
+		self.__getLoop().call_soon_threadsafe(self.__safeInterrupt)
+	
+	def __safeInterrupt(self, *_):
+		self.__getLoop().call_soon_threadsafe(self.__setInterruptState,KeyboardInterrupt())
+
 	def run(self):
-		with self.__runner:
-			try:
-				self.__runnerDelayer = AsyncDelayer(self.__runner.get_loop())
-				self._downstream()
-			finally:
+		h = signal.signal(signal.SIGINT, self.__unsafeInterrupt)
+		try:
+			with self.__runner:
 				try:
-					self.__setInterruptState(Exception("You shouldn't see this."))
+					self.__runnerDelayer = AsyncDelayer(self.__runner.get_loop())
+					self._downstream()
 				finally:
-					self.__threadPool.shutdown(wait = True, cancel_futures = True)
-			for c in self.__mustComplete:
-				c.result()
+					try:
+						self.__setInterruptState(Exception("You shouldn't see this."))
+					finally:
+						self.__threadPool.shutdown(wait = True)
+				for c in self.__mustComplete:
+					c.result()
+		finally:
+			signal.signal(signal.SIGINT, h)
 
 	def __getLoop(self):
 		return self.__runner.get_loop()
-	
-	def __runLoopUntilDone(self, task : Completion):
-		if not task.done():
-			loop = self.__getLoop()
-			task.then(lambda x:loop.stop())		
-			try:
-				loop.run_forever()
-			except BaseException as x:
-				self.__setInterruptState(x)
-				raise
-	
-	def completeNow(self,coro : Awaitable[A]) -> A:
-		"""
-		Block until the specified Awaitable is done. Return it's result or raise it's exception.
-		"""
-		task = Task(coro)
-		self.__runLoopUntilDone(task)
-		return task.result()
 	
 	def completeLater(self,fut : Future):
 		"""
@@ -78,49 +165,47 @@ class AsyncOps(Module):
 	
 	def __setInterruptState(self, x : BaseException):
 		try:
-			self.__threadPool.shutdown(wait = False, cancel_futures = True)
-		finally:
 			if not self.__interruptState.done():
 				self.__interruptState.setException(wrapException(x))
-
-	def __drainAttached(self):
-		exceptions = []
-		while len(self.__attached) != 0:
-			task = self.__attached[0]
-			if task.done():
-				self.__attached.pop(0)
-			else:
-				try:
-					self.__runLoopUntilDone(task)
-				except BaseException as x:
-					self.__setInterruptState(x)
-					exceptions.append(x)
-		self.__attached = None
-		if len(exceptions) != 0:
-			for x in exceptions:
-				absorbException(x)
-			raise ExceptionGroup("",exceptions = exceptions)
+		finally:
+			if self.__attached is not None:
+				for t in list(self.__attached):
+					t.tryCancel()
 	
-	def __attach(self, task : Completion):
+	def __onAttachedTaskDone(self, fut : BaseOpTask):
+		self.__attached.remove(fut)
+		if len(self.__attached) == 0:
+			loop = self.__getLoop()
+			if loop.is_running():
+				loop.stop()
+			return False
+		else:
+			return True
+
+	def __runUntilAllAttachedDone(self):
+		while len(self.__attached) != 0:
+			self.__getLoop().run_forever()
+		self.__attached = None
+	
+	def __attach(self, task : BaseOpTask):
 		"""
-		Attaches a task to the state of the AsnyncOps.
+		Attach a task to the state of the AsnyncOps.
 		Returns an attached task, which will either fail or complete.
 		"""
 
-		task = Gather(task, self.__interruptState, policy = cancelPolicy)
+		if task.done():
+			return task.minimal()
 
 		if self.__attached is None:
 			self.__attached = [task]
-			self.ws.append(self.__drainAttached)
+			self.ws.append(self.__runUntilAllAttachedDone)
 		else:
 			self.__attached.append(task)
 		
-		return task
+		task.then(self.__onAttachedTaskDone)
+		
+		return task.minimal()
 
-	def __ensureNotInterrupted(self):
-		if self.__interruptState.failed():
-			raise self.__interruptState.exception()
-	
 	def redLight(self) -> Awaitable:
 		"""
 		Yields async execution.
@@ -128,31 +213,24 @@ class AsyncOps(Module):
 		It is recommended to wait on this before the first time an operation
 		runs heavy computation, but only after dependent operations have been dispatched.
 
-		Note that red light may raise an exception if an interrupt has been issued.
+		This essentially suppresses fail-fast behaviour for awaiters, unless running in sequential mode.
 		"""
 		if self.__seqMode:
-			return Instant()
+			return INSTANT
 		
 		# It is best if the red lights are bunched together.
 		# They commonly preceede subprocess calls, which we would like to
 		# start as soon as possible, preferrably sooner than any task
 		# on the pooled threads, which slow down everything due to GIL.
+
+		# For the purposes of the progress bar, all progress units
+		# are supposed to be registered before the first red light await returns.
 		
 		if self.__currentRedLight is None or self.__currentRedLight.done():
-			self.__currentRedLight = self.__attach(AsyncCompletion(self.__getLoop()))
+			self.__currentRedLight = self.__attach(RedLightTask(self.__getLoop()))
 
 		return self.__currentRedLight
 	
-	async def __asyncioRunCommand(self, commandStr : str, input : bytes):
-		proc = await asyncio.create_subprocess_shell(commandStr,
-					stdout=asyncio.subprocess.PIPE,
-					stderr=asyncio.subprocess.PIPE,
-					stdin=asyncio.subprocess.PIPE)
-		
-		(stdout, stderr) = await proc.communicate(input = input)
-
-		return (proc.returncode, stdout, stderr)
-		
 	async def runCommand(self, command, input = bytes(), *, progressUnit = None) -> Tuple[int, bytes, bytes]:
 		"""
 		Runs the specified command. If given, the progressUnit is
@@ -160,22 +238,24 @@ class AsyncOps(Module):
 
 		Returns the exit code, the output, and error output of the command.
 		"""
-		self.__ensureNotInterrupted()
+		if self.__interruptState.failed():
+			return await self.__interruptState.minimal()
 
 		commandStr = subprocess.list2cmdline(str(c) for c in command)
 
 		if progressUnit is not None:
 			progressUnit.setRunning()
 		
-		asyf = self.__getLoop().create_task(self.__asyncioRunCommand(commandStr, input = input))
-
-		task = AsyncTask(asyf, loop = self.__getLoop())
+		task = AsyncioCommandTask(self.__getLoop(), commandStr, input)
 
 		if self.__seqMode:
-			self.__runLoopUntilDone(task)
+			self.__getLoop().run_until_complete(task.toAsyncioFuture(self.__getLoop()))
 
 		result = await self.__attach(task)
 
+		if self.__rawInterrupted:
+			raise InterruptedException()
+		
 		return result
 	
 	def callInBackground(self, command : Callable[[],A]) -> CompletionFuture[A]:
@@ -184,32 +264,15 @@ class AsyncOps(Module):
 		
 		A CompletionFuture is returned representing the future result of the call.
 		"""
-		self.__ensureNotInterrupted()
+		if self.__interruptState.failed():
+			return self.__interruptState.minimal()
 
 		if self.__seqMode:
 			cp = CompletableFuture()
 			cp.callAndSetResult(command)
 			return cp
 
-		unsafeCompletable = CompletableFuture()
-		safeCompletable = unsafeCompletable.withDelay(self.__runnerDelayer)
-		submitCommand = functools.partial(unsafeCompletable.callAndSetResult,command)
-
-		# Global interpreter lock has funny behaviour where the current thread
-		# is immediately halted when a new thread is created.
-		# Therefore it is best if we delay submission using our async loop first.
-
-		def doSubmit():
-			if not self.__interruptState.failed():
-				try:
-					self.__threadPool.submit(submitCommand)
-				except BaseException as ex:
-					self.__setInterruptState(ex)
-					absorbException(ex)
-		
-		self.__getLoop().call_soon(doSubmit)
-
-		return self.__attach(safeCompletable)
+		return self.__attach(ThreadPoolBackgroundTask(command, self.__threadPool, self.__runnerDelayer))
 
 def manifest() -> Type[AsyncOps]:
 	return AsyncOps
@@ -235,16 +298,26 @@ def once(fun : Callable[P,A]) -> Callable[P,A]:
 def task(coro : Callable[P,Awaitable[A]]) -> Callable[P,CompletionFuture[A]]:
 	"""
 	The decorated coroutine is wrapped in a completion Task.
-	Watch out for hanging tasks!
+	The task is explicitly not fail-fast.
 	"""
 	@functools.wraps(coro)
 	def wrapper(*args,**kwargs):
 		return Task(coro(*args,**kwargs))
 	return wrapper
 
-def op(arg : Callable[P,Awaitable[A]]) -> Callable[P,CompletionFuture[A]]:
+def operation(fun : Callable[P,Awaitable[A]]) -> Callable[P,CompletionFuture[A]]:
 	"""
-	A composition of the once and task decorators.
+	A composition of the once and task decorators, with the addition of fail-fast behaviour.
 	The decorated async method is ran asynchronously once per unique set of arguments.
+	
+	If it fails before the decorated method returns to the caller, the exception is raised immediately.
+	This behaviour can be modified by setting the "failFast" keyword argument to false.
 	"""
-	return once(task(arg))
+	fun = once(task(fun))
+	@functools.wraps(fun)
+	def wrapper(*args,failFast : bool = True,**kwargs):
+		k = fun(*args,**kwargs)
+		if failFast and k.failed():
+			raise k.exception()
+		return k
+	return wrapper

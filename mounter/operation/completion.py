@@ -10,6 +10,12 @@ always an overarching context of asynchronous execution
 such that by the time the context is closed, every completion
 belonging to that context is done.
 
+The main reason for this behaviour is the enabling of short-circuiting
+joint wait operations. For instance starting a set of operations and
+waiting until one of them evaluates to True to proceed. The wait can
+finish earlier while the remaining operations still have a guarantee
+of completion.
+
 Therefore, nothing needs awaiting, except actual Coroutines
 that still assume an awaiter.
 
@@ -114,6 +120,9 @@ class Future(Generic[A]):
 		return self.__result is not None
 	
 	def failed(self):
+		"""
+		Returns True if this future is done, and has completed exceptionally. False otherwise.
+		"""
 		if not self.done():
 			return False
 		return self.exception() is not None
@@ -330,7 +339,7 @@ class CompletionFuture(Future[A],Completion,Awaitable[A]):
 	def _complete(self):
 		raise Exception("_complete may not be called directly on CompletionFuture.")
 		
-	def _minimal(self):
+	def minimal(self):
 		newCompletion = CompletionFuture()
 		self.then(newCompletion._copyFrom)
 		return newCompletion
@@ -363,7 +372,7 @@ class CompletionFuture(Future[A],Completion,Awaitable[A]):
 		if loop is None:
 			loop = asyncio.get_event_loop()
 		future = loop.create_future()
-		self.thenCall(functools.partial(self.copyToAsyncioFuture,future))
+		self.thenCall(self.copyToAsyncioFuture,future)
 		return future
 	
 	def thenComplete(self, target : 'CompletableFuture'):
@@ -376,14 +385,10 @@ class CompletableFuture(CompletionFuture[A]):
 
 	It also supports the context manager protocol, (with) setting an exception
 	if it has not been completed before exiting the context.
-	"""
-	def __new__(cls) -> Self:
-		return super().__new__(cls)
-	
+	"""	
 	setResult = CompletionFuture._setResult
 	setException = CompletionFuture._setException
 	copyFrom = CompletionFuture._copyFrom
-	minimal = CompletionFuture._minimal
 	callAndSetResult = CompletionFuture._callAndSetResult
 	
 	def __enter__(self):
@@ -395,7 +400,7 @@ class CompletableFuture(CompletionFuture[A]):
 			self.setException(excc)
 
 class Instant(CompletionFuture[A]):
-	def __new__(cls, result : A = None, exception = None) -> Self:
+	def __new__(cls, result : A = None, exception = None) -> CompletionFuture:
 		self = super().__new__(cls)
 		if exception is not None:
 			self._setException(exception)
@@ -403,14 +408,18 @@ class Instant(CompletionFuture[A]):
 			self._setResult(result)
 		return self
 
+INSTANT : Final[CompletionFuture[None]] = Instant()
+
 class Task(CompletionFuture[A]):
 	"""
 	Performs an await operation and returns the result.
 	"""
 
 	__coro : Coroutine[Delayer,None,A]
-	def __new__(cls, coro : Awaitable[A]) -> CompletionFuture[A]:
+	def __new__(cls, coro : Awaitable[A], startDelay = INSTANT) -> CompletionFuture[A]:
 		if isinstance(coro,CompletionFuture):
+			if startDelay is not INSTANT:
+				return coro.withDelay(startDelay)
 			return coro
 		if isinstance(coro,Lazy):
 			return coro.start()
@@ -419,7 +428,7 @@ class Task(CompletionFuture[A]):
 			coro = awaitableToCoroutine(coro)
 		self = super().__new__(cls)
 		self.__coro = coro
-		self._advance(None)
+		startDelay.then(self._advance)
 		return self
 	
 	def _advance(self,_):
@@ -449,6 +458,16 @@ class Task(CompletionFuture[A]):
 					return
 				else:
 					exception = Exception(f"Awaiting {type(result)} is not supported!")
+
+def fftask(coro : Awaitable[A]) -> CompletionFuture[A]:
+	"""
+	Fail-fast task. Wraps the Awaitable in a Task, but if it
+	fails immediately, the exception is raised from fftask.
+	"""
+	coro = Task(coro)
+	if coro.failed():
+		raise coro.exception()
+	return coro
 
 class Lazy(Future[A],Delayer):
 	"""
@@ -598,15 +617,15 @@ def tuplePolicy(*fut : Future):
 		return Instant(result = tuple(k.result() for k in fut))
 	return None
 
-def cancelPolicy(core : Future[A], cancel : Future) -> Future[A]:
+def interruptPolicy(core : Future[A], cancel : Future) -> Future[A]:
 	"""
 	Gather completes when the first future completes with the result of the first future.
 	If the second future fails sooner, Gather also does so.
 	"""
-	if cancel.failed():
-		return cancel
 	if core.done():
 		return core
+	if cancel.failed():
+		return cancel
 	return None
 
 def orPolicy(*fut : CompletionFuture):
@@ -756,6 +775,10 @@ def gatherAnd(*c : Awaitable[bool]) -> Awaitable[bool]:
 #		assert not self.__locked
 #		self.__locked = True
 #		return self
+#
+#	async def __aenter__(self):
+#       await self
+#       self.__locked = True
 #	
 #	def __exit__(self, exct, excc, excs):
 #		assert self.__locked
@@ -774,3 +797,7 @@ def gatherAnd(*c : Awaitable[bool]) -> Awaitable[bool]:
 #				self.__inUnlockLoop = False
 #			if len(exceptions) != 0:
 #				raise ExceptionGroup("",exceptions)
+#
+#	async def __aexit__(self, exct, excc, excs):
+#		self.__exit__(exct,excc,excs)
+#

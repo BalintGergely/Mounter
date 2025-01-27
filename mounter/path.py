@@ -2,6 +2,7 @@ import pathlib
 import shutil
 import re
 import os
+import zlib
 from typing import Hashable, Final, List, Tuple, Self, TextIO, BinaryIO, overload, Iterable
 
 class Path(Hashable):
@@ -9,7 +10,9 @@ class Path(Hashable):
 	Represents an absolute file Path.
 	This always uses forward slash '/' for separators.
 	"""
-	__p: Final[pathlib.Path]
+	__p : Final[pathlib.Path]
+	__s : str | None
+	__h : int | None
 	def __new__(cls,path):
 		if cls is Path and type(path) is Path:
 			return path
@@ -17,13 +20,19 @@ class Path(Hashable):
 		if isinstance(path,Path):
 			self.__p = path.__p
 			self.__s = path.__s
+			self.__h = path.__h
 		else:
 			self.__p = pathlib.Path(path).absolute().resolve()
 			self.__s = None
+			self.__h = None
 		return self
 	
 	def __hash__(self):
-		return self.__p.__hash__()
+		h = self.__h
+		if h is None:
+			h = zlib.adler32(str(self).encode())
+			self.__h = h
+		return h
 	
 	def __eq__(self,other):
 		return isinstance(other,Path) and self.__p == other.__p
@@ -328,6 +337,7 @@ class PathSet(Hashable):
 	__hitEndOnMatch : int
 	__directoryOnly : bool
 	__singleton : bool
+	__hash : int
 
 	def __new__(cls, pattern : 'str | Path | PathSet'):
 		if type(pattern) is PathSet:
@@ -344,6 +354,7 @@ class PathSet(Hashable):
 		(pattern,det,ndet,dir) = PathSet.__core.fullmatch(pattern).group(0,1,2,3)
 		self.__compiled = ()
 		self.__root = None
+		self.__hash = None
 		self.__singleton = not bool(ndet)
 		if det:
 			self.__root = Path(det)
@@ -414,9 +425,13 @@ class PathSet(Hashable):
 	def __contains__(self, path : Path):
 		(pm,_) = self.__fullMatch(path)
 		return pm
-
-	def __hash__(self) -> int:
-		return hash(self.__pattern)
+	
+	def __hash__(self):
+		h = self.__hash
+		if h is None:
+			h = zlib.adler32(self.__pattern.encode())
+			self.__hash = h
+		return h
 
 	def __eq__(self, value: object) -> bool:
 		return type(self) == type(value) and self.__pattern == value.__pattern

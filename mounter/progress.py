@@ -87,6 +87,7 @@ class Progress(Module):
 			self._downstream()
 		finally:
 			if not self.verbose:
+				self.__printNonVerbose()
 				print()
 			self.__printFinalStatistics()
 
