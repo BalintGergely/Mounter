@@ -4,6 +4,7 @@ import time
 from typing import List, Dict
 from mounter.path import Path
 from mounter.workspace import Module
+from mounter.operation.loop import AsyncioLoop
 
 def persistenceTypeId(obj):
 	l : List[type] = list(type(obj).mro())[:-1]
@@ -16,6 +17,11 @@ class Persistence(Module):
 	"""
 	def __init__(self, context) -> None:
 		super().__init__(context)
+		assert AsyncioLoop not in self.ws, (
+			"""
+When depending on both persistence and asyncio, please specify persistence as a dependency first.
+"""
+		)
 		self._file : Path = None
 		self._root : dict = None
 		self.__self_id = persistenceTypeId(self)

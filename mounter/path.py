@@ -267,10 +267,9 @@ __section = re.compile(
 	 r"(?P<seplongstarepi>(?:/\*{2,})+$)"
 	r"|(?P<seplongstarsep>(?:/\*{2,})+/)"
 	r"|(?P<sep>/)"
-	r"|(?P<ques>\?)"
 	r"|(?P<longstarepi>\*{2,}$)"
 	r"|(?P<longstar>\*{2,})"
-	r"|(?P<star>\*)"
+	r"|(?P<quesstar>(?:\*(?!\*)|\?)+)"
 	r"|(?P<char>[-_ a-zA-Z0-9]+)"
 	r"|(?P<misc>.)"
 )
@@ -286,12 +285,20 @@ def _compilePattern(pathstr):
 			preRegex = preRegex + r"(/"
 			postRegex = r")?" + postRegex
 			groupCount += 1
-		if match["ques"]:
+		if match["quesstar"]:
 			#  ? : Match any non-separator character.
-			preRegex = preRegex + r"[^/]"
-		if match["star"]:
 			#  * : Match any sequence that does not contain a separator.
-			preRegex = preRegex + r"[^/]*?"
+			# Adjacent * and ? are intelligently merged.
+			quesCount = match["quesstar"].count("?")
+			if "*" not in match["quesstar"]:
+				# No star, so match exactly quesCount
+				preRegex = preRegex + r"[^/]{" + str(quesCount) + "}"
+			elif 0 < quesCount:
+				# Star present, so match at least quesCount
+				preRegex = preRegex + r"[^/]{" + str(quesCount) + ",}?"
+			else:
+				# Star present, but no ques so match any.
+				preRegex = preRegex + r"[^/]*?"
 		if match["longstarepi"]:
 			# Trailing ** : Match any possible suffix.
 			preRegex = preRegex + r".*"
@@ -334,7 +341,7 @@ class PathSet(Hashable):
 	__pattern : str
 	__compiled : re.Pattern
 	__fullGroup : int
-	__hitEndOnMatch : int
+	__hitEndOnMatch : bool
 	__directoryOnly : bool
 	__singleton : bool
 	__hash : int

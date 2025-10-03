@@ -5,6 +5,7 @@ from mounter.path import Path, PathSet, PathLike
 from mounter.workspace import Module, Workspace
 from mounter.persistence import Persistence
 from mounter.operation.completion import *
+from mounter.operation.parallel import Parallel
 from mounter.operation import *
 
 TYPE_NONE = b''
@@ -61,7 +62,7 @@ class PathCheckObject():
 		if fmd == md:
 			return
 		if t == TYPE_FILE:
-			fhs = await self.checker.ws[AsyncOps].callInBackground(self.__computeFileHash)
+			fhs = await self.checker.ws[Parallel].callInBackground(self.__computeFileHash)
 		if t == TYPE_DIR:
 			dig = hashlib.md5()
 			self.subpaths = tuple(p for p in self.path.getChildren(deterministic = True) if self.checker.isFileRelevant(p))
@@ -145,7 +146,7 @@ class FileDeltaChecker(Module):
 	def __init__(self, context: Workspace) -> None:
 		super().__init__(context)
 		self.ws.add(Persistence)
-		self.ws.add(AsyncOps)
+		self.ws.add(Parallel)
 	
 	def _newVersion(self, checker : PathCheckObject):
 		c = self.__counter

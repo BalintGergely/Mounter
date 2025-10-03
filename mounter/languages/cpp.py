@@ -11,6 +11,8 @@ from mounter.progress import *
 from mounter.goal import *
 from mounter.operation import *
 from mounter.operation.completion import Instant, Task
+from mounter.operation.subprocess import SubprocessManager, readAllBytes, DEVNULL
+from mounter.operation.bridge import RedLight
 from mounter.exceptions import BuildException
 
 CPP_STRING_LITERAL = re.compile((
@@ -301,15 +303,20 @@ class ClangCppGroup(AggregatorCppGroup):
 		self.__binDirectory.opCreateDirectories()
 		return self.__binDirectory
 	
-	async def __runCommandHandleResult(self, commandSeq, progressUnit):
-		(rc, a, b) = await self.ws[AsyncOps].runCommand(commandSeq, progressUnit = progressUnit)
-		if rc != 0:
+	async def __runCommandHandleResult(self, commandSeq, progressUnit : ProgressUnit):
+		sp = await self.ws[SubprocessManager].startSubprocess(commandSeq, stdin=DEVNULL)
+
+		progressUnit.setRunning()
+		r,a,b = await gather(sp.waitExit(), readAllBytes(sp.stdout), readAllBytes(sp.stderr))
+
+		if r != 0:
 			raise BuildException(
-				f"[Mounter] Output by: {subprocess.list2cmdline(commandSeq)}\n"
+				f"[Mounter] Output by: {list2cmdline(commandSeq)}\n"
 				+ b.decode()
-				+ f"[Mounter] Process exited with code {rc}.")
-		if b != b'' or rc != 0:
-			print(f"Output by: {subprocess.list2cmdline(commandSeq)}")
+				+ f"[Mounter] Process exited with code {r}.")
+		
+		if b != b'' or r != 0:
+			print(f"Output by: {list2cmdline(commandSeq)}")
 			print(b.decode(),end="")
 		return a == b'' and b == b''
 
@@ -326,7 +333,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			includes,args,_ = await gather(
 				self._getMyIncludes(),
 				self.__getAdditionalPreprocessArguments(),
-				self.ws[AsyncOps].redLight()
+				self.ws[RedLight]
 			)
 
 			args = sorted(args)
@@ -370,7 +377,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				done.setResult(outputFile)
 
 				includeHash = []
-				ipset = await self.ws[AsyncOps].callInBackground(functools.partial(readIncludes, outputFile))
+				ipset = await self.ws[Parallel].callInBackground(functools.partial(readIncludes, outputFile))
 				for path in ipset:
 					if any(i.isSubpath(path) for i in includes):
 						includeHash.append(deltaChecker.query(path))
@@ -383,7 +390,7 @@ class ClangCppGroup(AggregatorCppGroup):
 	@once
 	def __preprocess(self, sourceFile : Path) -> Awaitable[Path]:
 		done = CompletableFuture()
-		self.ws[AsyncOps].completeLater(Task(self.__doPreprocess(sourceFile, done)))
+		self.ws[Guardian].completeLater(Task(self.__doPreprocess(sourceFile, done)))
 		return done.minimal()
 	
 	@operation
@@ -396,7 +403,7 @@ class ClangCppGroup(AggregatorCppGroup):
 			preFile,args,_ = await gather(
 				self.__preprocess(sourceFile),
 				self.__getAdditionalCompileArguments(),
-				self.ws[AsyncOps].redLight()
+				self.ws[RedLight]
 			)
 			
 			args = sorted(args)
@@ -498,7 +505,7 @@ class ClangCppGroup(AggregatorCppGroup):
 				self._getMyStaticLibraries(),
 				self.getObjects(),
 				self.__getAdditionalLinkerArguments(),
-				self.ws[AsyncOps].redLight()
+				self.ws[RedLight]
 			)
 			
 			args = sorted(args)
@@ -575,7 +582,7 @@ class CppModule(Module):
 		self.ws.add(FileManagement)
 		self.ws.add(FileDeltaChecker)
 		self.ws.add(Progress)
-		self.ws.add(AsyncOps)
+		self.ws.add(SubprocessManager)
 		self.rootDirectory = Path(".")
 		self.objDirectory = self.rootDirectory.subpath("obj/cpp")
 		self.binDirectory = self.rootDirectory.subpath("bin")
@@ -685,4 +692,4 @@ class CppProject(Module,SupportsCppGroup):
 		for p in sorted(self.__mainPaths):
 			name = p.withExtension("exe").getName()
 			if self.ws[GoalTracker].defineThenQuery(name):
-				self.ws[AsyncOps].completeLater(self._compileExecutable(p,name))
+				self.ws[Guardian].completeLater(self._compileExecutable(p,name))

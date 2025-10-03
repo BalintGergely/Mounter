@@ -1,7 +1,10 @@
 
 from typing import Set, Dict
 from functools import partial
-from mounter.operation.core import *
+from mounter.workspace import Module
+from mounter.operation.bridge import Bridge, RedLight
+from mounter.operation.parallel import Parallel
+from mounter.operation.util import *
 from mounter.path import Path
 from mounter.persistence import Persistence, persistenceTypeId
 from mounter.delta import FileDeltaChecker
@@ -11,6 +14,9 @@ class FileManagement(Module):
 	def __init__(self, context) -> None:
 		super().__init__(context)
 		self.ws.add(Persistence)
+		self.ws.add(Bridge)
+		self.ws.add(RedLight)
+		self.ws.add(Parallel)
 	
 	def run(self):
 		self.__store : Dict[str,Dict[str,Dict]] = self.ws[Persistence].lookup(self)
@@ -48,13 +54,13 @@ class FileManagement(Module):
 	async def copyFile(self, sourcePath : Path, targetPath : Path):
 		with self.ws[Progress].register() as pu:
 			pu.setName(f"Copy {sourcePath} to {targetPath}")
-			await self.ws[AsyncOps].redLight()
+			await self.ws[RedLight]
 			sourceHash = await self.ws[FileDeltaChecker].query(sourcePath)
 			data = self.lock(targetPath,self)
 			if sourceHash != data.get("sourceHash",None) \
 			or not targetPath.isPresent():
 				pu.setRunning()
-				await self.ws[AsyncOps].callInBackground(partial(FileManagement.__doCopy,sourcePath,targetPath))
+				await self.ws[Parallel].callInBackground(partial(FileManagement.__doCopy,sourcePath,targetPath))
 				data["sourceHash"] = sourceHash
 			else:
 				pu.setUpToDate()

@@ -2,7 +2,6 @@
 import shutil
 import itertools
 from typing import List
-from mounter.operation.completion import isInterrupt
 from mounter.workspace import *
 from mounter.workspace import Workspace
 
@@ -67,12 +66,8 @@ class ProgressUnit():
 			self.__state = TICK_SKIPPED
 			self.__r(self, TICK_SKIPPED)
 		elif self.__state is TICK_RUNNING:
-			if isInterrupt(excc):
-				self.__state = TICK_STOPPED
-				self.__r(self, TICK_STOPPED)
-			else:
-				self.__state = TICK_FAILED
-				self.__r(self, TICK_FAILED)
+			self.__state = TICK_FAILED
+			self.__r(self, TICK_FAILED)
 
 class Progress(Module):
 	def __init__(self, context) -> None:

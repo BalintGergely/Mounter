@@ -16,15 +16,12 @@ waiting until one of them evaluates to True to proceed. The wait can
 finish earlier while the remaining operations still have a guarantee
 of completion.
 
-Therefore, nothing needs awaiting, except actual Coroutines
-that still assume an awaiter.
-
-One example of such context of asynchronous execution is implemented
-by AsyncOps, which manages a context in the form of a Workspace module.
+The secondary reason for the existence of this module is to have a
+reliable way to turn everything sequential and deterministically ordered
+at the flip of a switch.
 """
 
 from typing import *
-import asyncio
 import functools
 
 A = TypeVar('A')
@@ -126,6 +123,11 @@ class Future(Generic[A]):
 		if not self.done():
 			return False
 		return self.exception() is not None
+	
+	def succeeded(self):
+		if not self.done():
+			return False
+		return self.exception() is None
 		
 	def result(self) -> A:
 		"""
@@ -146,16 +148,6 @@ class Future(Generic[A]):
 			return what
 		else:
 			return None
-	
-	def copyToAsyncioFuture(self, future : asyncio.Future):
-		"""
-		Assigns the result of this Future to the specified asyncio future.
-		"""
-		(doRaise,what) = self.__result
-		if doRaise:
-			future.set_exception(what)
-		else:
-			future.set_result(what)
 	
 	def __await__(self):
 		if not self.done():
@@ -188,11 +180,29 @@ class Delayer():
 		"""
 		self.then(lambda _: proc(*args,**kwargs))
 	
-	def __await__(self):
+	def __await__(self) -> Generator['Delayer']:
 		yield self
 	
 	def __iter__(self):
 		return (yield from self.__await__())
+
+class DelayerMethod(Delayer):
+	def __init__(self, fun : Callable[[], None]):
+		self.__fun = fun
+	
+	def __set_name__(self, owner, name):
+		self.__name = name
+	
+	def __get__(self, target, *args, **kwargs):
+		delayerObject = DelayerMethod(self.__fun.__get__(target, *args, **kwargs))
+		setattr(target, self.__name, delayerObject)
+		return delayerObject
+	
+	def thenCall(self, proc, *args, **kwargs):
+		self.__fun(functools.partial(proc,*args,**kwargs))
+	
+	def then(self, proc : Callable[[Self], None]):
+		self.thenCall(proc,self)
 
 class LoopDelayer(Delayer):
 	"""
@@ -240,6 +250,13 @@ class LoopDelayer(Delayer):
 			raise ExceptionGroup("",exceptions = exceptions)
 
 class QueueDelayer(Delayer):
+	"""
+	A delayer adding callbacks to a queue and offering a run method
+	to manually run a specified number of callbacks.
+
+	Any user of QueueDelayer is RESPONSIBLE for ensuring the queue
+	will be eventually fully drained.
+	"""
 	__queue : List[Callable[[Self],None]]
 	def __new__(cls) -> Self:
 		self = super().__new__(cls)
@@ -260,16 +277,6 @@ class QueueDelayer(Delayer):
 			tasksRun += 1
 		return tasksRun
 
-class DelegatedDelayer(Delayer):
-	__delegate : Callable[[Callable], None]
-	def __new__(cls, delegate : Callable[[Callable], None]) -> Self:
-		self = super().__new__(cls)
-		self.__delegate = delegate
-		return self
-	
-	def then(self,proc : Callable):
-		self.__delegate(functools.partial(proc,self))
-
 class Completion(Delayer):
 	"""
 	A queue of callbacks that will be run when a certain event occurs.
@@ -281,6 +288,11 @@ class Completion(Delayer):
 		self = super().__new__(cls)
 		self.__queue = []
 		return self
+
+	def fromDelayer(d : Delayer):
+		c = Completion()
+		d.thenCall(c._complete)
+		return c
 	
 	def _complete(self):
 		exceptions = []
@@ -365,16 +377,6 @@ class CompletionFuture(Future[A],Completion,Awaitable[A]):
 
 		return newCompletion
 
-	def toAsyncioFuture(self, loop : asyncio.AbstractEventLoop | None = None):
-		"""
-		Returns an asyncio future that is completed when this completion is completed.
-		"""
-		if loop is None:
-			loop = asyncio.get_event_loop()
-		future = loop.create_future()
-		self.thenCall(self.copyToAsyncioFuture,future)
-		return future
-	
 	def thenComplete(self, target : 'CompletableFuture'):
 		self.then(target.copyFrom)
 
@@ -396,8 +398,10 @@ class CompletableFuture(CompletionFuture[A]):
 
 	def __exit__(self, exct, excc, excs):
 		if not self.done():
-			assert excc is not None
-			self.setException(excc)
+			if excc is None:
+				self.setException(Exception("CompletableFuture exited without setting a result"))
+			else:
+				self.setException(excc)
 
 class Instant(CompletionFuture[A]):
 	def __new__(cls, result : A = None, exception = None) -> CompletionFuture:
@@ -468,6 +472,15 @@ def fftask(coro : Awaitable[A]) -> CompletionFuture[A]:
 	if coro.failed():
 		raise coro.exception()
 	return coro
+
+def instantCall(target : Callable[[],A], *args, **kwargs) -> Instant[A]:
+	"""
+	Call a function and return an Instant with the result.
+	"""
+	try:
+		return Instant(result = target(*args,**kwargs))
+	except BaseException as exc:
+		return Instant(exception = exc)
 
 class Lazy(Future[A],Delayer):
 	"""
@@ -541,112 +554,52 @@ def aggressiveTask(coro : Awaitable[A]):
 			else:
 				toThrow = None
 
-class AsyncDelayer(Delayer):
-	"""
-	A delayer which registers the callbacks to a specified asyncio event loop.
-	Waiting on this blocks until the next pass of the event loop.
-	"""
-	__loop : asyncio.AbstractEventLoop
-	def __new__(cls, loop : asyncio.AbstractEventLoop | None = None) -> Self:
-		self = super().__new__(cls)
-		if loop is None:
-			loop = asyncio.get_event_loop()
-		self.__loop = loop
-		return self
-	
-	def then(self,proc : Callable):
-		self.__loop.call_soon_threadsafe(proc, self)
-
-class AsyncCompletion(Completion):
-	"""
-	A Completion that is immediately scheduled to be completed in the specified async event loop.
-	This provides the same scheduling as AsyncTask, except without a result.
-	"""
-	def __new__(cls, loop : asyncio.AbstractEventLoop | None = None) -> Self:
-		self = super().__new__(cls)
-		if loop is None:
-			loop = asyncio.get_event_loop()
-		loop.call_soon_threadsafe(self._complete)
-		return self
-
-class AsyncTask(CompletionFuture[A]):
-	"""
-	Wraps an asyncio awaitable in a CompletionFuture. If it is not a future,
-	it is scheduled for execution.
-	"""
-	__future : asyncio.Future
-	def __new__(cls, asyncCoro : Awaitable[A], loop : asyncio.AbstractEventLoop | None = None) -> Self:
-		self = super().__new__(cls)
-		self.__future = asyncio.ensure_future(asyncCoro, loop = loop)
-		if self.__future.done():
-			self.__completeFromAsyncioFuture(self.__future)
-		else:
-			self.__future.add_done_callback(self.__completeFromAsyncioFuture)
-		return self
-
-	def __completeFromAsyncioFuture(self, future : asyncio.Future[A]):
-		if future.cancelled():
-			self._setException(CancelledException())
-		else:
-			exc = future.exception()
-			if exc is None:
-				self._setResult(future.result())
-			else:
-				self._setException(exc)
-
-def completePolicy(*fut : Future):
+def completePolicy(group : 'Gather', *_):
 	"""
 	Gather completes when all futures are done.
 	Result will be tuple of results if all succeeded.
 	If any failed, Gather fails.
 	"""
-	if all(k.done() for k in fut):
-		if any(k.failed() for k in fut):
-			exc = ExceptionGroup("", (k.exception() for k in fut if k.failed()))
+	if group.remaining() == 0:
+		if any(k.failed() for k in group.futures()):
+			exc = ExceptionGroup("", (k.exception() for k in group.futures() if k.failed()))
 			return Instant(exception = exc)
-		return Instant(result = tuple(k.result() for k in fut))
+		return Instant(result = tuple(k.result() for k in group.futures()))
 	return None
 
-def tuplePolicy(*fut : Future):
+def tuplePolicy(group : 'Gather', *latest : Future):
 	"""
 	Gather completes when all futures are done with a tuple of results.
 	If any fails, Gather completes with the first exception.
 	"""
-	for f in filter(Future.failed,fut): return f
-	if all(k.done() for k in fut):
-		return Instant(result = tuple(k.result() for k in fut))
+	for l in latest:
+		if l.failed():
+			return l
+	if group.remaining() == 0:
+		return Instant(result = tuple(k.result() for k in group.futures()))
 	return None
 
-def interruptPolicy(core : Future[A], cancel : Future) -> Future[A]:
-	"""
-	Gather completes when the first future completes with the result of the first future.
-	If the second future fails sooner, Gather also does so.
-	"""
-	if core.done():
-		return core
-	if cancel.failed():
-		return cancel
-	return None
-
-def orPolicy(*fut : CompletionFuture):
+def orPolicy(group : 'Gather', *latest : Future):
 	"""
 	Performs a disjunction over futures.
 	Gather completes early if any complete with True.
 	"""
-	for f in filter(lambda f: f.done() and f.result(), fut): return f
-	for f in filter(Future.failed,fut): return f
-	if all(k.done() for k in fut):
+	for l in latest:
+		if l.failed() or l.result():
+			return l
+	if group.remaining() == 0:
 		return Instant(False)
 	return None
 
-def andPolicy(*fut : CompletionFuture):
+def andPolicy(group : 'Gather', *latest : Future):
 	"""
 	Performs a conjunction over futures.
 	Gather completes early if any complete with False.
 	"""
-	for f in filter(lambda f: f.done() and not f.result(), fut): return f
-	for f in filter(Future.failed,fut): return f
-	if all(k.done() for k in fut):
+	for l in latest:
+		if l.failed() or not l.result():
+			return l
+	if group.remaining() == 0:
 		return Instant(True)
 	return None
 
@@ -657,7 +610,7 @@ class Gather(CompletionFuture[A]):
 	def __new__(
 			cls,
 			*completions : CompletionFuture | Coroutine,
-			policy : Callable[[*T],Future[A]] = tuplePolicy,
+			policy : Callable[['Gather',Future],Future[A]] = tuplePolicy,
 			failFast : bool = False) -> 'Gather[A]':
 		self = super().__new__(cls)
 
@@ -684,27 +637,39 @@ class Gather(CompletionFuture[A]):
 		if exception is not None:
 			raise exception
 
+		self.__completions = tuple(self.__completions)
+
 		self.__policy = policy
 
 		self.__pendingCallsToAdvance = 1
 
+		alreadyCompleted = []
+
 		for t in self.__completions:
-			if not t.done():
+			if t.done():
+				alreadyCompleted.append(t)
+			else:
 				self.__pendingCallsToAdvance += 1
 				t.then(self.__advance)
 		
-		self.__advance(None)
+		self.__advance(*alreadyCompleted)
 
 		return self
+	
+	def remaining(self):
+		return self.__pendingCallsToAdvance
 
-	def __advance(self, _):
+	def futures(self):
+		return self.__completions
+
+	def __advance(self, *latest):
 		if self.__pendingCallsToAdvance == 0:
 			return
 
 		self.__pendingCallsToAdvance -= 1
 
 		try:
-			fin : Awaitable | None = self.__policy(*self.__completions)
+			fin : Awaitable | None = self.__policy(self, *latest)
 		except BaseException as exc:
 			self.__pendingCallsToAdvance = 0
 			self._setException(wrapException(exc))
@@ -777,8 +742,8 @@ def gatherAnd(*c : Awaitable[bool]) -> Awaitable[bool]:
 #		return self
 #
 #	async def __aenter__(self):
-#       await self
-#       self.__locked = True
+#		await self
+#		self.__locked = True
 #	
 #	def __exit__(self, exct, excc, excs):
 #		assert self.__locked

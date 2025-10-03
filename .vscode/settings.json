@@ -1,4 +1,6 @@
 {
 	"editor.indentSize": "tabSize",
-	"terminal.integrated.enablePersistentSessions": false
+	"terminal.integrated.enablePersistentSessions": false,
+	"java.dependency.packagePresentation": "hierarchical",
+	"editor.insertSpaces": false
 }

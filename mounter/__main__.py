@@ -7,7 +7,6 @@ from mounter.path import Path
 from mounter.persistence import Persistence
 from mounter.goal import GoalTracker
 from mounter.progress import Progress
-from mounter.operation import AsyncOps
 from mounter.operation.completion import isInterrupt
 from mounter.exceptions import BuildException
 
@@ -18,18 +17,18 @@ bin = Path("bin")
 parser = argparse.ArgumentParser()
 parser.add_argument('project', type=str, help='The project to build.')
 parser.add_argument('goals', type=str, help='The goals to build', nargs='*')
-parser.add_argument('--hustle', action="store_true", help="Wait for user confirmation at the beginning.")
+parser.add_argument('--wait', action="store_true", help="Wait for user confirmation at the beginning.")
 parser.add_argument('--verbose', action="store_true", help="Print detailed information on what mounter is doing.")
 parser.add_argument('--disassembly', action="store_true", help="Use textual intermediate representation, wherever applicable.")
 parser.add_argument('--debug', action="store_true", help="Compile debug information, wherever applicable.")
 parser.add_argument('--optimalize', action="store_true", help="Enable optimalizations.")
-parser.add_argument('--sequential', action="store_true", help="Use deterministic sequential execution.")
+# parser.add_argument('--sequential', action="store_true", help="Use deterministic sequential execution.")
 
 w = Workspace()
 
 args = parser.parse_args()
 
-if args.hustle:
+if args.wait:
 	result = input("Press enter to continue > ")
 	if result != "":
 		print("Halting because non-empty input string given")
@@ -53,11 +52,6 @@ if GoalTracker in w:
 if Persistence in w:
 	persistence = w[Persistence]
 	persistence.setPersistenceFile(obj.subpath("mounterPersist.json"))
-
-if AsyncOps in w:
-	ops = w[AsyncOps]
-	if args.sequential:
-		ops.disableAsync()
 
 if cpp.ClangModule in w:
 	cppManifest = w[cpp.ClangModule]
